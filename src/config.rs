@@ -52,7 +52,7 @@ impl Default for EngineConfig {
                 ring_capacity: 48000, // 1s at 48kHz
             },
             dsp: DspConfig {
-                fft_size: 2048,
+                fft_size: 4096,
                 hop_size: 512,
                 n_mels: 229,
                 mel_fmin: 30.0,

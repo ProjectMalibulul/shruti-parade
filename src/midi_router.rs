@@ -14,7 +14,10 @@ pub struct MidiRouter {
 
 impl MidiRouter {
     pub fn new(event_rx: Receiver<NoteEvent>, render_tx: Sender<NoteEvent>) -> Self {
-        Self { event_rx, render_tx }
+        Self {
+            event_rx,
+            render_tx,
+        }
     }
 
     /// Blocking router loop — call from a dedicated thread.

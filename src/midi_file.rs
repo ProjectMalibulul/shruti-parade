@@ -188,15 +188,12 @@ pub fn stream_midi_file(
 ) -> Result<()> {
     let data = std::fs::read(path)
         .with_context(|| format!("Cannot read MIDI file: {}", path.display()))?;
-    let smf = midly::Smf::parse(&data)
-        .map_err(|e| anyhow::anyhow!("MIDI parse error: {e}"))?;
+    let smf = midly::Smf::parse(&data).map_err(|e| anyhow::anyhow!("MIDI parse error: {e}"))?;
 
     // ---- Determine timing mode ----
     let timing_mode = match smf.header.timing {
         midly::Timing::Metrical(tpb) => TimingMode::Metrical(tpb.as_int() as u32),
-        midly::Timing::Timecode(fps, sub) => {
-            TimingMode::Timecode(fps.as_int() as f64 * sub as f64)
-        }
+        midly::Timing::Timecode(fps, sub) => TimingMode::Timecode(fps.as_int() as f64 * sub as f64),
     };
 
     // ---- Build tempo map from all tracks ----

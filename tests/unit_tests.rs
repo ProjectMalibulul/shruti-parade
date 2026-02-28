@@ -12,8 +12,8 @@
 
 #[cfg(test)]
 mod timing_tests {
-    use std::sync::Arc;
     use shruti_parade::timing::AudioClock;
+    use std::sync::Arc;
 
     #[test]
     fn new_clock_starts_at_zero() {
@@ -170,7 +170,7 @@ mod config_tests {
     fn default_config_values() {
         let cfg = EngineConfig::default();
         assert_eq!(cfg.audio.sample_rate, 48000);
-        assert_eq!(cfg.dsp.fft_size, 2048);
+        assert_eq!(cfg.dsp.fft_size, 4096);
         assert_eq!(cfg.dsp.n_mels, 229);
         assert!(cfg.render.bloom_enabled);
         assert!(cfg.render.particles_enabled);
@@ -312,11 +312,7 @@ mod dsp_tests {
         let fb = build_mel_filterbank(40, 2048, 48000.0, 30.0, 8000.0);
         assert_eq!(fb.len(), 40, "Should have 40 mel filters");
         for (i, filt) in fb.iter().enumerate() {
-            assert_eq!(
-                filt.len(),
-                2048 / 2 + 1,
-                "Filter {i} should cover n_bins"
-            );
+            assert_eq!(filt.len(), 2048 / 2 + 1, "Filter {i} should cover n_bins");
         }
     }
 
@@ -387,14 +383,20 @@ mod render_util_tests {
     #[test]
     fn piano_min_maps_to_minus_one() {
         let x = pitch_to_ndc_x(21); // A0 = PIANO_MIN
-        assert!((x - (-1.0)).abs() < 1e-6, "PIANO_MIN should map to -1.0, got {x}");
+        assert!(
+            (x - (-1.0)).abs() < 1e-6,
+            "PIANO_MIN should map to -1.0, got {x}"
+        );
     }
 
     #[test]
     fn piano_max_maps_to_near_plus_one() {
         let x = pitch_to_ndc_x(108); // C8 = PIANO_MAX
-        // Should be close to +1.0 (exactly 2.0 * 87.0 / 87.0 - 1.0 = 1.0)
-        assert!((x - 1.0).abs() < 1e-6, "PIANO_MAX should map to +1.0, got {x}");
+                                     // Should be close to +1.0 (exactly 2.0 * 87.0 / 87.0 - 1.0 = 1.0)
+        assert!(
+            (x - 1.0).abs() < 1e-6,
+            "PIANO_MAX should map to +1.0, got {x}"
+        );
     }
 
     #[test]

@@ -20,7 +20,7 @@ use tracing::info;
 use audio::AudioCapture;
 use audio::AudioPlayback;
 use config::EngineConfig;
-use dsp::DspPipeline;
+use dsp::{DspPipeline, PitchFrame};
 use events::NoteEvent;
 use inference::InferenceEngine;
 use midi_router::MidiRouter;
@@ -128,7 +128,7 @@ fn main() -> Result<()> {
             info!("Loading audio file: {}", path.display());
 
             let (audio_prod, audio_cons) = rtrb::RingBuffer::new(config.audio.ring_capacity);
-            let (mel_tx, mel_rx) = crossbeam_channel::bounded::<dsp::MelFrame>(64);
+            let (pitch_tx, pitch_rx) = crossbeam_channel::bounded::<PitchFrame>(64);
             let (event_tx, event_rx) = crossbeam_channel::bounded::<NoteEvent>(256);
 
             // Playback at the file's native sample rate
@@ -158,24 +158,21 @@ fn main() -> Result<()> {
                     }
                 })?;
 
-            // T1: DSP
+            // T1: DSP — use the file's actual sample rate for correct frequency mapping
             let dsp_cfg = config.dsp.clone();
-            let sr = config.audio.sample_rate;
             std::thread::Builder::new()
                 .name("dsp".into())
                 .spawn(move || {
-                    let mut pipe = DspPipeline::new(dsp_cfg, audio_cons, mel_tx, sr);
+                    let mut pipe = DspPipeline::new(dsp_cfg, audio_cons, pitch_tx, file_sr);
                     pipe.run();
                 })?;
 
             // T2: inference
             let inf_cfg = config.inference.clone();
-            let dsp_cfg_for_inf = config.dsp.clone();
             std::thread::Builder::new()
                 .name("inference".into())
                 .spawn(move || {
-                    let mut eng =
-                        InferenceEngine::new(inf_cfg, dsp_cfg_for_inf, mel_rx, event_tx);
+                    let mut eng = InferenceEngine::new(inf_cfg, pitch_rx, event_tx);
                     eng.run();
                 })?;
 
@@ -195,34 +192,35 @@ fn main() -> Result<()> {
             info!("Using live audio capture");
 
             let (audio_prod, audio_cons) = rtrb::RingBuffer::new(config.audio.ring_capacity);
-            let (mel_tx, mel_rx) = crossbeam_channel::bounded::<dsp::MelFrame>(64);
+            let (pitch_tx, pitch_rx) = crossbeam_channel::bounded::<PitchFrame>(64);
             let (event_tx, event_rx) = crossbeam_channel::bounded::<NoteEvent>(256);
 
             _playback_handle = None;
             drop(playback_cons);
             drop(playback_prod);
 
-            _audio_handle =
-                Some(AudioCapture::start(&config.audio, clock.clone(), audio_prod)?);
+            _audio_handle = Some(AudioCapture::start(
+                &config.audio,
+                clock.clone(),
+                audio_prod,
+            )?);
 
-            // T1: DSP
+            // T1: DSP — live capture uses the configured sample rate
             let dsp_cfg = config.dsp.clone();
             let sr = config.audio.sample_rate;
             std::thread::Builder::new()
                 .name("dsp".into())
                 .spawn(move || {
-                    let mut pipe = DspPipeline::new(dsp_cfg, audio_cons, mel_tx, sr);
+                    let mut pipe = DspPipeline::new(dsp_cfg, audio_cons, pitch_tx, sr);
                     pipe.run();
                 })?;
 
             // T2: inference
             let inf_cfg = config.inference.clone();
-            let dsp_cfg_for_inf = config.dsp.clone();
             std::thread::Builder::new()
                 .name("inference".into())
                 .spawn(move || {
-                    let mut eng =
-                        InferenceEngine::new(inf_cfg, dsp_cfg_for_inf, mel_rx, event_tx);
+                    let mut eng = InferenceEngine::new(inf_cfg, pitch_rx, event_tx);
                     eng.run();
                 })?;
 

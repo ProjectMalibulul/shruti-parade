@@ -1,5 +1,5 @@
-use std::path::Path;
 use anyhow::{Context, Result};
+use std::path::Path;
 use tracing::info;
 
 /// Read the sample rate from a WAV file without consuming it.
@@ -63,7 +63,11 @@ pub fn stream_wav_file(
         samples
     };
 
-    info!("WAV loaded: {} mono samples ({:.1}s)", mono.len(), mono.len() as f64 / sr);
+    info!(
+        "WAV loaded: {} mono samples ({:.1}s)",
+        mono.len(),
+        mono.len() as f64 / sr
+    );
 
     // Stream at ~real-time pace.
     for chunk in mono.chunks(chunk_size) {

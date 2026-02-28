@@ -19,8 +19,8 @@ pub struct NoteEvent {
 pub struct VisualNote {
     pub pitch: u8,
     pub velocity: u8,
-    pub start_time: f64,         // seconds
-    pub end_time: Option<f64>,   // None ⇒ still held
+    pub start_time: f64,       // seconds
+    pub end_time: Option<f64>, // None ⇒ still held
 }
 
 /// Compact GPU-side per-instance data for a falling note rectangle.
@@ -28,12 +28,12 @@ pub struct VisualNote {
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct NoteInstance {
-    pub position: [f32; 2],      // centre in NDC coords
-    pub size: [f32; 2],          // width, height
-    pub color: [f32; 4],         // RGBA
-    pub border_radius: f32,      // corner radius in NDC
-    pub glow_intensity: f32,     // 0.0 = off, 1.0 = full glow
-    pub _pad: [f32; 2],          // align to 48 bytes
+    pub position: [f32; 2],  // centre in NDC coords
+    pub size: [f32; 2],      // width, height
+    pub color: [f32; 4],     // RGBA
+    pub border_radius: f32,  // corner radius in NDC
+    pub glow_intensity: f32, // 0.0 = off, 1.0 = full glow
+    pub _pad: [f32; 2],      // align to 48 bytes
 }
 
 /// GPU-side per-instance data for a piano key.
@@ -53,7 +53,7 @@ pub struct Particle {
     pub position: [f32; 2],
     pub velocity: [f32; 2],
     pub color: [f32; 4],
-    pub life: f32,       // 0..1, decreases each frame
+    pub life: f32, // 0..1, decreases each frame
     pub size: f32,
 }
 
@@ -74,4 +74,3 @@ pub struct FrameUniforms {
     pub time: f32,
     pub _pad: f32,
 }
-

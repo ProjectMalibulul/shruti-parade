@@ -46,12 +46,24 @@ struct Vertex {
 }
 
 const QUAD_VERTS: [Vertex; 6] = [
-    Vertex { position: [-0.5, -0.5] },
-    Vertex { position: [0.5, -0.5] },
-    Vertex { position: [0.5, 0.5] },
-    Vertex { position: [-0.5, -0.5] },
-    Vertex { position: [0.5, 0.5] },
-    Vertex { position: [-0.5, 0.5] },
+    Vertex {
+        position: [-0.5, -0.5],
+    },
+    Vertex {
+        position: [0.5, -0.5],
+    },
+    Vertex {
+        position: [0.5, 0.5],
+    },
+    Vertex {
+        position: [-0.5, -0.5],
+    },
+    Vertex {
+        position: [0.5, 0.5],
+    },
+    Vertex {
+        position: [-0.5, 0.5],
+    },
 ];
 
 // ---------------------------------------------------------------------------
@@ -206,12 +218,36 @@ fn vertex_layout() -> wgpu::VertexBufferLayout<'static> {
 
 fn note_instance_layout() -> wgpu::VertexBufferLayout<'static> {
     static ATTRS: [wgpu::VertexAttribute; 6] = [
-        wgpu::VertexAttribute { offset: 0, shader_location: 1, format: wgpu::VertexFormat::Float32x2 },  // position
-        wgpu::VertexAttribute { offset: 8, shader_location: 2, format: wgpu::VertexFormat::Float32x2 },  // size
-        wgpu::VertexAttribute { offset: 16, shader_location: 3, format: wgpu::VertexFormat::Float32x4 }, // color
-        wgpu::VertexAttribute { offset: 32, shader_location: 4, format: wgpu::VertexFormat::Float32 },   // border_radius
-        wgpu::VertexAttribute { offset: 36, shader_location: 5, format: wgpu::VertexFormat::Float32 },   // glow_intensity
-        wgpu::VertexAttribute { offset: 40, shader_location: 6, format: wgpu::VertexFormat::Float32x2 }, // _pad (skipped by shader, but stride needs it)
+        wgpu::VertexAttribute {
+            offset: 0,
+            shader_location: 1,
+            format: wgpu::VertexFormat::Float32x2,
+        }, // position
+        wgpu::VertexAttribute {
+            offset: 8,
+            shader_location: 2,
+            format: wgpu::VertexFormat::Float32x2,
+        }, // size
+        wgpu::VertexAttribute {
+            offset: 16,
+            shader_location: 3,
+            format: wgpu::VertexFormat::Float32x4,
+        }, // color
+        wgpu::VertexAttribute {
+            offset: 32,
+            shader_location: 4,
+            format: wgpu::VertexFormat::Float32,
+        }, // border_radius
+        wgpu::VertexAttribute {
+            offset: 36,
+            shader_location: 5,
+            format: wgpu::VertexFormat::Float32,
+        }, // glow_intensity
+        wgpu::VertexAttribute {
+            offset: 40,
+            shader_location: 6,
+            format: wgpu::VertexFormat::Float32x2,
+        }, // _pad (skipped by shader, but stride needs it)
     ];
     wgpu::VertexBufferLayout {
         array_stride: std::mem::size_of::<NoteInstance>() as u64,
@@ -222,11 +258,31 @@ fn note_instance_layout() -> wgpu::VertexBufferLayout<'static> {
 
 fn key_instance_layout() -> wgpu::VertexBufferLayout<'static> {
     static ATTRS: [wgpu::VertexAttribute; 5] = [
-        wgpu::VertexAttribute { offset: 0, shader_location: 1, format: wgpu::VertexFormat::Float32x2 },
-        wgpu::VertexAttribute { offset: 8, shader_location: 2, format: wgpu::VertexFormat::Float32x2 },
-        wgpu::VertexAttribute { offset: 16, shader_location: 3, format: wgpu::VertexFormat::Float32x4 },
-        wgpu::VertexAttribute { offset: 32, shader_location: 4, format: wgpu::VertexFormat::Float32 },
-        wgpu::VertexAttribute { offset: 36, shader_location: 5, format: wgpu::VertexFormat::Float32x3 }, // _pad
+        wgpu::VertexAttribute {
+            offset: 0,
+            shader_location: 1,
+            format: wgpu::VertexFormat::Float32x2,
+        },
+        wgpu::VertexAttribute {
+            offset: 8,
+            shader_location: 2,
+            format: wgpu::VertexFormat::Float32x2,
+        },
+        wgpu::VertexAttribute {
+            offset: 16,
+            shader_location: 3,
+            format: wgpu::VertexFormat::Float32x4,
+        },
+        wgpu::VertexAttribute {
+            offset: 32,
+            shader_location: 4,
+            format: wgpu::VertexFormat::Float32,
+        },
+        wgpu::VertexAttribute {
+            offset: 36,
+            shader_location: 5,
+            format: wgpu::VertexFormat::Float32x3,
+        }, // _pad
     ];
     wgpu::VertexBufferLayout {
         array_stride: std::mem::size_of::<KeyInstance>() as u64,
@@ -237,9 +293,21 @@ fn key_instance_layout() -> wgpu::VertexBufferLayout<'static> {
 
 fn particle_instance_layout() -> wgpu::VertexBufferLayout<'static> {
     static ATTRS: [wgpu::VertexAttribute; 3] = [
-        wgpu::VertexAttribute { offset: 0, shader_location: 1, format: wgpu::VertexFormat::Float32x2 },
-        wgpu::VertexAttribute { offset: 8, shader_location: 2, format: wgpu::VertexFormat::Float32x2 },
-        wgpu::VertexAttribute { offset: 16, shader_location: 3, format: wgpu::VertexFormat::Float32x4 },
+        wgpu::VertexAttribute {
+            offset: 0,
+            shader_location: 1,
+            format: wgpu::VertexFormat::Float32x2,
+        },
+        wgpu::VertexAttribute {
+            offset: 8,
+            shader_location: 2,
+            format: wgpu::VertexFormat::Float32x2,
+        },
+        wgpu::VertexAttribute {
+            offset: 16,
+            shader_location: 3,
+            format: wgpu::VertexFormat::Float32x4,
+        },
     ];
     wgpu::VertexBufferLayout {
         array_stride: std::mem::size_of::<ParticleInstance>() as u64,
@@ -359,8 +427,13 @@ impl GpuState {
         // ---- offscreen textures for bloom ----
         let w = size.width.max(1);
         let h = size.height.max(1);
-        let tex_usage = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING;
-        let tex_size = wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 };
+        let tex_usage =
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING;
+        let tex_size = wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        };
 
         let scene_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("scene-tex"),
@@ -467,8 +540,14 @@ impl GpuState {
             label: Some("bloom-threshold-bg"),
             layout: &bloom_tex_bgl,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&scene_texture_view) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&bloom_sampler) },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&scene_texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&bloom_sampler),
+                },
             ],
         });
 
@@ -476,8 +555,14 @@ impl GpuState {
             label: Some("bloom-blur-h-bg"),
             layout: &bloom_tex_bgl,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&bloom_a_texture_view) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&bloom_sampler) },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&bloom_a_texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&bloom_sampler),
+                },
             ],
         });
 
@@ -485,8 +570,14 @@ impl GpuState {
             label: Some("bloom-blur-v-bg"),
             layout: &bloom_tex_bgl,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&bloom_b_texture_view) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&bloom_sampler) },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&bloom_b_texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&bloom_sampler),
+                },
             ],
         });
 
@@ -494,9 +585,18 @@ impl GpuState {
             label: Some("bloom-composite-bg"),
             layout: &bloom_composite_bgl,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&bloom_a_texture_view) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&bloom_sampler) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&scene_texture_view) },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&bloom_a_texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&bloom_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&scene_texture_view),
+                },
             ],
         });
 
@@ -512,10 +612,12 @@ impl GpuState {
             push_constant_ranges: &[],
         });
 
-
         // ---- helper for fullscreen pipelines ----
         let make_fullscreen_pipeline =
-            |label: &str, layout: &wgpu::PipelineLayout, fs_entry: &str, blend: Option<wgpu::BlendState>| {
+            |label: &str,
+             layout: &wgpu::PipelineLayout,
+             fs_entry: &str,
+             blend: Option<wgpu::BlendState>| {
                 device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                     label: Some(label),
                     layout: Some(layout),
@@ -542,7 +644,6 @@ impl GpuState {
                     cache: None,
                 })
             };
-
 
         // ---- instanced geometry pipelines ----
         let note_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -603,7 +704,6 @@ impl GpuState {
             cache: None,
         });
 
-
         let particle_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("particle-pipeline"),
             layout: Some(&uniform_pipeline_layout),
@@ -640,7 +740,6 @@ impl GpuState {
             cache: None,
         });
 
-
         // Fullscreen hit-line overlay (drawn on top of scene; alpha blend)
         let hitline_pipeline = make_fullscreen_pipeline(
             "hitline-pipeline",
@@ -649,14 +748,9 @@ impl GpuState {
             Some(wgpu::BlendState::ALPHA_BLENDING),
         );
 
-
         // Bloom passes
-        let bloom_threshold_pipeline = make_fullscreen_pipeline(
-            "bloom-threshold",
-            &bloom_tex_pl,
-            "fs_bloom_threshold",
-            None,
-        );
+        let bloom_threshold_pipeline =
+            make_fullscreen_pipeline("bloom-threshold", &bloom_tex_pl, "fs_bloom_threshold", None);
         let bloom_blur_h_pipeline =
             make_fullscreen_pipeline("bloom-blur-h", &bloom_tex_pl, "fs_bloom_blur_h", None);
         let bloom_blur_v_pipeline =
@@ -667,7 +761,6 @@ impl GpuState {
             "fs_bloom_composite",
             None,
         );
-
 
         // ---- vertex / instance buffers ----
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -765,12 +858,7 @@ impl ApplicationHandler for App {
         self.gpu = Some(gpu);
     }
 
-    fn window_event(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        _id: WindowId,
-        event: WindowEvent,
-    ) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
@@ -818,7 +906,8 @@ impl App {
                         let hue = pitch_to_hue(ev.pitch);
                         let (r, g, b) = hsv_to_rgb(hue, 0.9, 1.0);
                         let a = (ev.velocity as f32 / 127.0).clamp(0.4, 1.0);
-                        self.particles.spawn([x, HIT_LINE_Y], [r, g, b, a], PARTICLE_BURST);
+                        self.particles
+                            .spawn([x, HIT_LINE_Y], [r, g, b, a], PARTICLE_BURST);
                     }
                 }
                 NoteEventKind::NoteOff => {
@@ -867,10 +956,7 @@ impl App {
         // ---- collect which pitches are currently active ----
         let mut active_pitches = [false; 128];
         for note in &self.visual_notes {
-            if note.end_time.is_none()
-                && note.pitch >= PIANO_MIN
-                && note.pitch <= PIANO_MAX
-            {
+            if note.end_time.is_none() && note.pitch >= PIANO_MIN && note.pitch <= PIANO_MAX {
                 active_pitches[note.pitch as usize] = true;
             }
         }
@@ -906,11 +992,8 @@ impl App {
                     white_idx += 1;
                 }
             }
-            gpu.queue.write_buffer(
-                &gpu.key_instance_buffer,
-                0,
-                bytemuck::cast_slice(&keys),
-            );
+            gpu.queue
+                .write_buffer(&gpu.key_instance_buffer, 0, bytemuck::cast_slice(&keys));
         }
 
         // ---- build note instances ----

@@ -18,8 +18,8 @@ use tracing::info;
 
 /// Peek the sample rate from an audio file header without decoding.
 pub fn audio_file_sample_rate(path: &Path) -> Result<u32> {
-    let file = std::fs::File::open(path)
-        .with_context(|| format!("Cannot open: {}", path.display()))?;
+    let file =
+        std::fs::File::open(path).with_context(|| format!("Cannot open: {}", path.display()))?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
 
     let mut hint = Hint::new();
@@ -48,8 +48,8 @@ pub fn audio_file_sample_rate(path: &Path) -> Result<u32> {
 /// Decode an entire audio file to mono f32 samples.
 /// Returns `(samples, sample_rate)`.
 pub fn decode_audio_file(path: &Path) -> Result<(Vec<f32>, u32)> {
-    let file = std::fs::File::open(path)
-        .with_context(|| format!("Cannot open: {}", path.display()))?;
+    let file =
+        std::fs::File::open(path).with_context(|| format!("Cannot open: {}", path.display()))?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
 
     let mut hint = Hint::new();
@@ -71,14 +71,10 @@ pub fn decode_audio_file(path: &Path) -> Result<(Vec<f32>, u32)> {
         .clone();
 
     let sample_rate = track.codec_params.sample_rate.unwrap_or(44100);
-    let n_channels = track
-        .codec_params
-        .channels
-        .map(|c| c.count())
-        .unwrap_or(1);
+    let n_channels = track.codec_params.channels.map(|c| c.count()).unwrap_or(1);
 
-    let mut decoder = symphonia::default::get_codecs()
-        .make(&track.codec_params, &DecoderOptions::default())?;
+    let mut decoder =
+        symphonia::default::get_codecs().make(&track.codec_params, &DecoderOptions::default())?;
 
     let mut all_samples: Vec<f32> = Vec::new();
 

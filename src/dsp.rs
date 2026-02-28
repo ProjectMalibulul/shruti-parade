@@ -6,14 +6,22 @@ use tracing::{debug, info};
 use crate::config::DspConfig;
 
 // ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+pub const PIANO_LO: u8 = 21; // A0
+pub const PIANO_HI: u8 = 108; // C8
+
+// ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
 
-/// A single mel-spectrogram frame emitted by the DSP pipeline.
+/// Per-pitch energy frame produced by the harmonic-sieve DSP pipeline.
+/// Each element is the harmonic-weighted energy for one MIDI pitch.
 #[derive(Clone)]
-pub struct MelFrame {
-    pub data: Vec<f32>,      // length = n_mels
-    pub sample_offset: u64,  // sample index of frame centre
+pub struct PitchFrame {
+    pub pitch_energy: [f32; 128], // indexed by MIDI pitch (0-127)
+    pub sample_offset: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -51,18 +59,204 @@ impl CircBuf {
 }
 
 // ---------------------------------------------------------------------------
+// Harmonic template — pre-computed FFT bins + weights for one MIDI pitch
+// ---------------------------------------------------------------------------
+
+/// For each MIDI pitch we precompute which FFT bins correspond to its
+/// fundamental and first several harmonics, plus a 1/h weighting.
+pub struct HarmonicTemplate {
+    /// FFT bin indices for each harmonic (h = 1, 2, 3, …)
+    pub bins: Vec<usize>,
+    /// Weight for each harmonic (1/h decay)
+    pub weights: Vec<f32>,
+}
+
+/// Maximum number of harmonics to consider per pitch.
+const MAX_HARMONICS: usize = 8;
+
+/// Build harmonic templates for all 88 piano keys (MIDI 21–108).
+/// Returns a 128-element Vec indexed by MIDI pitch; entries outside
+/// the piano range are `None`.
+pub fn build_harmonic_templates(
+    sample_rate: f32,
+    fft_size: usize,
+) -> Vec<Option<HarmonicTemplate>> {
+    let nyquist = sample_rate / 2.0;
+    let n_bins = fft_size / 2 + 1;
+
+    let mut templates: Vec<Option<HarmonicTemplate>> = (0..128).map(|_| None).collect();
+
+    for midi in PIANO_LO..=PIANO_HI {
+        let f0 = midi_to_hz(midi);
+        let mut bins = Vec::new();
+        let mut weights = Vec::new();
+
+        for h in 1..=MAX_HARMONICS {
+            let fh = f0 * h as f32;
+            if fh >= nyquist * 0.95 {
+                break;
+            }
+
+            let bin = (fh * fft_size as f32 / sample_rate).round() as usize;
+            if bin >= n_bins {
+                break;
+            }
+
+            bins.push(bin);
+            weights.push(1.0 / h as f32);
+        }
+
+        if !bins.is_empty() {
+            templates[midi as usize] = Some(HarmonicTemplate { bins, weights });
+        }
+    }
+
+    templates
+}
+
+/// Compute per-pitch energy from FFT magnitudes using harmonic product spectrum.
+///
+/// Uses a **weighted geometric mean** of magnitudes at harmonic positions.
+/// This ensures that ALL expected harmonics must be present for a pitch
+/// to score high. A false-positive pitch (whose score comes from just one
+/// or two harmonic coincidences with another note) gets killed because its
+/// fundamental bin has near-zero energy.
+///
+/// `score = exp( Σ(w_h · ln(mag_h)) / Σ(w_h) )`  where w_h = 1/h
+pub fn compute_pitch_energies(
+    magnitudes: &[f32],
+    templates: &[Option<HarmonicTemplate>],
+) -> [f32; 128] {
+    let mut energies = [0.0f32; 128];
+    let n_bins = magnitudes.len();
+    let eps = 1e-10f32;
+
+    for midi in PIANO_LO..=PIANO_HI {
+        if let Some(ref tmpl) = templates[midi as usize] {
+            if tmpl.bins.len() < 2 {
+                // Need at least 2 harmonics for a reliable geometric mean
+                // Fall back to simple magnitude for very high pitches
+                let bin = tmpl.bins[0];
+                let lo = bin.saturating_sub(1);
+                let hi = (bin + 1).min(n_bins - 1);
+                energies[midi as usize] =
+                    magnitudes[lo..=hi].iter().copied().fold(0.0f32, f32::max);
+                continue;
+            }
+
+            let mut weighted_log_sum = 0.0f32;
+            let mut total_weight = 0.0f32;
+
+            for (&bin, &weight) in tmpl.bins.iter().zip(tmpl.weights.iter()) {
+                let lo = bin.saturating_sub(1);
+                let hi = (bin + 1).min(n_bins - 1);
+                let mag = magnitudes[lo..=hi].iter().copied().fold(0.0f32, f32::max);
+
+                weighted_log_sum += weight * (mag.max(eps)).ln();
+                total_weight += weight;
+            }
+
+            if total_weight > 0.0 {
+                energies[midi as usize] = (weighted_log_sum / total_weight).exp();
+            }
+        }
+    }
+
+    energies
+}
+
+/// Suppress pitches whose energy is explained by harmonics of a stronger pitch.
+///
+/// Process from strongest pitch to weakest. For each fundamental:
+///   1. **Upward harmonics**: suppress pitches at h × f0 (h = 2..8)
+///   2. **Sub-harmonics**: suppress pitches at f0 / h (h = 2..8) that
+///      have a higher harmonic landing on f0.
+///
+/// In both directions, ±1 semitone around the target is checked to
+/// account for spectral leakage from ±1 FFT bin neighbourhood.
+///
+/// Pitches with energy ≥ `ratio_threshold` of the stronger pitch are
+/// kept — they may be real concurrent notes.
+pub fn suppress_harmonic_aliasing(energies: &mut [f32; 128], ratio_threshold: f32) {
+    // Collect active pitches sorted by energy (strongest first)
+    let mut sorted: Vec<(usize, f32)> = (PIANO_LO as usize..=PIANO_HI as usize)
+        .filter(|&p| energies[p] > 0.0)
+        .map(|p| (p, energies[p]))
+        .collect();
+    sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+
+    let mut suppressed = [false; 128];
+
+    for &(fund_midi, fund_energy) in &sorted {
+        if suppressed[fund_midi] {
+            continue;
+        }
+
+        let f0 = midi_to_hz(fund_midi as u8);
+
+        // ---- Upward harmonics: pitches at h × f0 ----
+        for h in 2..=MAX_HARMONICS {
+            let fh = f0 * h as f32;
+            let midi_f = 69.0 + 12.0 * (fh / 440.0).log2();
+            let midi_round = midi_f.round() as i32;
+
+            // Check ±1 semitone to catch spectral leakage
+            for offset in -1..=1i32 {
+                let check = midi_round + offset;
+                if check >= PIANO_LO as i32 && check <= PIANO_HI as i32 {
+                    let ci = check as usize;
+                    if !suppressed[ci]
+                        && ci != fund_midi
+                        && energies[ci] < fund_energy * ratio_threshold
+                    {
+                        energies[ci] = 0.0;
+                        suppressed[ci] = true;
+                    }
+                }
+            }
+        }
+
+        // ---- Sub-harmonics: pitches at f0 / h ----
+        // These are pitches whose h-th harmonic coincides with our fundamental.
+        for h in 2..=MAX_HARMONICS {
+            let fh = f0 / h as f32;
+            if fh < 20.0 {
+                continue;
+            }
+            let midi_f = 69.0 + 12.0 * (fh / 440.0).log2();
+            let midi_round = midi_f.round() as i32;
+
+            for offset in -1..=1i32 {
+                let check = midi_round + offset;
+                if check >= PIANO_LO as i32 && check <= PIANO_HI as i32 {
+                    let ci = check as usize;
+                    if !suppressed[ci]
+                        && ci != fund_midi
+                        && energies[ci] < fund_energy * ratio_threshold
+                    {
+                        energies[ci] = 0.0;
+                        suppressed[ci] = true;
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // DSP pipeline
 // ---------------------------------------------------------------------------
 
 pub struct DspPipeline {
     config: DspConfig,
     consumer: rtrb::Consumer<f32>,
-    mel_tx: Sender<MelFrame>,
+    pitch_tx: Sender<PitchFrame>,
     circ: CircBuf,
     hann: Vec<f32>,
     fft_in: Vec<f32>,
     fft_out: Vec<Complex<f32>>,
-    mel_fb: Vec<Vec<f32>>,
+    magnitudes: Vec<f32>,
+    harmonic_templates: Vec<Option<HarmonicTemplate>>,
     sample_count: u64,
 }
 
@@ -70,7 +264,7 @@ impl DspPipeline {
     pub fn new(
         config: DspConfig,
         consumer: rtrb::Consumer<f32>,
-        mel_tx: Sender<MelFrame>,
+        pitch_tx: Sender<PitchFrame>,
         sample_rate: u32,
     ) -> Self {
         let n_bins = config.fft_size / 2 + 1;
@@ -82,22 +276,17 @@ impl DspPipeline {
             })
             .collect();
 
-        let mel_fb = build_mel_filterbank(
-            config.n_mels,
-            config.fft_size,
-            sample_rate as f32,
-            config.mel_fmin,
-            config.mel_fmax,
-        );
+        let harmonic_templates = build_harmonic_templates(sample_rate as f32, config.fft_size);
 
         Self {
             circ: CircBuf::new(config.fft_size),
             hann,
             fft_in: vec![0.0; config.fft_size],
             fft_out: vec![Complex::default(); n_bins],
-            mel_fb,
+            magnitudes: vec![0.0; n_bins],
+            harmonic_templates,
             consumer,
-            mel_tx,
+            pitch_tx,
             sample_count: 0,
             config,
         }
@@ -106,8 +295,8 @@ impl DspPipeline {
     /// Blocking DSP loop — call from a dedicated thread.
     pub fn run(&mut self) {
         info!(
-            "DSP pipeline started (fft={}, hop={}, mels={})",
-            self.config.fft_size, self.config.hop_size, self.config.n_mels
+            "DSP pipeline started (fft={}, hop={}, harmonic sieve)",
+            self.config.fft_size, self.config.hop_size,
         );
 
         let mut planner = RealFftPlanner::<f32>::new();
@@ -148,29 +337,23 @@ impl DspPipeline {
                 continue;
             }
 
-            // ---- magnitude → mel filterbank → log ----
-            let mel: Vec<f32> = self
-                .mel_fb
-                .iter()
-                .map(|filt| {
-                    let energy: f32 = filt
-                        .iter()
-                        .zip(self.fft_out.iter())
-                        .map(|(&w, c)| w * (c.re * c.re + c.im * c.im).sqrt())
-                        .sum();
-                    (energy.max(1e-10)).ln()
-                })
-                .collect();
+            // ---- compute magnitudes ----
+            for (i, c) in self.fft_out.iter().enumerate() {
+                self.magnitudes[i] = (c.re * c.re + c.im * c.im).sqrt();
+            }
+
+            // ---- harmonic sieve → per-pitch energies ----
+            let pitch_energy = compute_pitch_energies(&self.magnitudes, &self.harmonic_templates);
 
             if self
-                .mel_tx
-                .send(MelFrame {
-                    data: mel,
+                .pitch_tx
+                .send(PitchFrame {
+                    pitch_energy,
                     sample_offset: self.sample_count,
                 })
                 .is_err()
             {
-                debug!("Mel channel closed — DSP shutting down");
+                debug!("Pitch channel closed — DSP shutting down");
                 return;
             }
         }
@@ -178,7 +361,15 @@ impl DspPipeline {
 }
 
 // ---------------------------------------------------------------------------
-// Mel-filterbank construction (HTK-style triangular filters)
+// Utility: MIDI pitch → frequency
+// ---------------------------------------------------------------------------
+
+pub fn midi_to_hz(midi: u8) -> f32 {
+    440.0 * 2.0f32.powf((midi as f32 - 69.0) / 12.0)
+}
+
+// ---------------------------------------------------------------------------
+// Mel-filterbank construction (kept for tests / future use)
 // ---------------------------------------------------------------------------
 
 pub fn hz_to_mel(hz: f32) -> f32 {
