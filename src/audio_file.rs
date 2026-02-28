@@ -78,13 +78,7 @@ pub fn decode_audio_file(path: &Path) -> Result<(Vec<f32>, u32)> {
 
     let mut all_samples: Vec<f32> = Vec::new();
 
-    loop {
-        let packet = match format.next_packet() {
-            Ok(p) => p,
-            // End of stream (various formats signal this differently)
-            Err(_) => break,
-        };
-
+    while let Ok(packet) = format.next_packet() {
         if packet.track_id() != track.id {
             continue;
         }

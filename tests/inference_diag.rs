@@ -102,9 +102,9 @@ fn diagnose_single_note_energy_distribution() {
     }
 
     // Apply harmonic aliasing suppression + local-max filter (same as inference engine)
-    let abs_min_energy: f32 = 8.0;
+    let abs_min_energy: f32 = 4.0;
     let mut filtered = pitch_energy;
-    dsp::suppress_harmonic_aliasing(&mut filtered, 0.65);
+    dsp::suppress_harmonic_aliasing(&mut filtered, 0.50);
 
     for p in PIANO_LO as usize..=PIANO_HI as usize {
         if filtered[p] < abs_min_energy {
@@ -123,7 +123,7 @@ fn diagnose_single_note_energy_distribution() {
         };
         let mut is_max = true;
         for q in lo..=hi {
-            if q != p && pitch_energy[q] > pitch_energy[p] {
+            if q != p && filtered[q] > filtered[p] {
                 is_max = false;
                 break;
             }
@@ -182,9 +182,9 @@ fn diagnose_two_simultaneous_notes() {
     let pitch_energy = dsp::compute_pitch_energies(&magnitudes, &templates);
 
     // Harmonic aliasing suppression + local-max ±2 semitones (same as inference)
-    let abs_min_energy: f32 = 8.0;
+    let abs_min_energy: f32 = 4.0;
     let mut filtered = pitch_energy;
-    dsp::suppress_harmonic_aliasing(&mut filtered, 0.65);
+    dsp::suppress_harmonic_aliasing(&mut filtered, 0.50);
 
     for p in PIANO_LO as usize..=PIANO_HI as usize {
         if filtered[p] < abs_min_energy {
@@ -203,7 +203,7 @@ fn diagnose_two_simultaneous_notes() {
         };
         let mut is_max = true;
         for q in lo..=hi {
-            if q != p && pitch_energy[q] > pitch_energy[p] {
+            if q != p && filtered[q] > filtered[p] {
                 is_max = false;
                 break;
             }
@@ -254,9 +254,9 @@ fn diagnose_three_simultaneous_notes() {
     let pitch_energy = dsp::compute_pitch_energies(&magnitudes, &templates);
 
     // Harmonic aliasing suppression + local-max ±2 semitones (same as inference)
-    let abs_min_energy: f32 = 8.0;
+    let abs_min_energy: f32 = 4.0;
     let mut filtered = pitch_energy;
-    dsp::suppress_harmonic_aliasing(&mut filtered, 0.65);
+    dsp::suppress_harmonic_aliasing(&mut filtered, 0.50);
 
     for p in PIANO_LO as usize..=PIANO_HI as usize {
         if filtered[p] < abs_min_energy {
@@ -275,7 +275,7 @@ fn diagnose_three_simultaneous_notes() {
         };
         let mut is_max = true;
         for q in lo..=hi {
-            if q != p && pitch_energy[q] > pitch_energy[p] {
+            if q != p && filtered[q] > filtered[p] {
                 is_max = false;
                 break;
             }

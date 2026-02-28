@@ -3,6 +3,7 @@ use std::path::Path;
 use tracing::info;
 
 /// Read the sample rate from a WAV file without consuming it.
+#[allow(dead_code)]
 pub fn wav_sample_rate(path: &Path) -> Result<u32> {
     let reader = hound::WavReader::open(path)
         .with_context(|| format!("Failed to open WAV file: {}", path.display()))?;
@@ -17,6 +18,7 @@ pub fn wav_sample_rate(path: &Path) -> Result<u32> {
 ///
 /// If `playback_producer` is `Some`, samples are also pushed to a second
 /// ring for audio output playback.
+#[allow(dead_code)]
 pub fn stream_wav_file(
     path: &Path,
     mut producer: rtrb::Producer<f32>,

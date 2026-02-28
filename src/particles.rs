@@ -11,11 +11,17 @@ pub struct ParticleSystem {
     particles: Vec<Particle>,
 }
 
-impl ParticleSystem {
-    pub fn new() -> Self {
+impl Default for ParticleSystem {
+    fn default() -> Self {
         Self {
             particles: Vec::with_capacity(MAX_PARTICLES),
         }
+    }
+}
+
+impl ParticleSystem {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Spawn a burst of particles at `pos` with the given base `color`.
@@ -72,6 +78,7 @@ impl ParticleSystem {
             .collect()
     }
 
+    #[allow(dead_code)]
     pub fn count(&self) -> usize {
         self.particles.len()
     }

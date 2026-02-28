@@ -47,10 +47,7 @@ impl AudioPlayback {
             &stream_config,
             move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
                 for sample in data.iter_mut() {
-                    *sample = match consumer.pop() {
-                        Ok(s) => s,
-                        Err(_) => 0.0, // silence when ring is empty
-                    };
+                    *sample = consumer.pop().unwrap_or(0.0);
                 }
             },
             |err| error!("Audio output stream error: {err}"),

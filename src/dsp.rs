@@ -74,6 +74,12 @@ pub struct HarmonicTemplate {
 /// Maximum number of harmonics to consider per pitch.
 const MAX_HARMONICS: usize = 8;
 
+/// Minimum ratio of the fundamental's magnitude to the overall weighted-mean
+/// score.  Pitches whose fundamental is weaker than this fraction of their
+/// score are likely false positives from harmonic coincidence with another
+/// note's upper partials (e.g. perfect-fifth ghost notes).
+const FUNDAMENTAL_GATE: f32 = 0.10;
+
 /// Build harmonic templates for all 88 piano keys (MIDI 21–108).
 /// Returns a 128-element Vec indexed by MIDI pitch; entries outside
 /// the piano range are `None`.
@@ -114,50 +120,54 @@ pub fn build_harmonic_templates(
     templates
 }
 
-/// Compute per-pitch energy from FFT magnitudes using harmonic product spectrum.
+/// Compute per-pitch energy from FFT magnitudes using weighted harmonic sum.
 ///
-/// Uses a **weighted geometric mean** of magnitudes at harmonic positions.
-/// This ensures that ALL expected harmonics must be present for a pitch
-/// to score high. A false-positive pitch (whose score comes from just one
-/// or two harmonic coincidences with another note) gets killed because its
-/// fundamental bin has near-zero energy.
+/// Uses a **weighted arithmetic mean** of magnitudes at harmonic positions
+/// (w_h = 1/h).  This is robust to missing upper harmonics — a real piano
+/// note scores high even if harmonics 5–8 are weak or absent, while a
+/// false-positive pitch (whose score comes from one harmonic coincidence
+/// with another note) still scores low because most of its template bins
+/// are empty.
 ///
-/// `score = exp( Σ(w_h · ln(mag_h)) / Σ(w_h) )`  where w_h = 1/h
+/// A **fundamental gate** rejects pitches whose fundamental bin has very
+/// little energy relative to the score.  This catches "ghost notes" caused
+/// by non-integer harmonic coincidence (e.g. a perfect fifth above/below a
+/// strong note).
+///
+/// `score = Σ(w_h · mag_h) / Σ(w_h)`  where w_h = 1/h
 pub fn compute_pitch_energies(
     magnitudes: &[f32],
     templates: &[Option<HarmonicTemplate>],
 ) -> [f32; 128] {
     let mut energies = [0.0f32; 128];
     let n_bins = magnitudes.len();
-    let eps = 1e-10f32;
 
     for midi in PIANO_LO..=PIANO_HI {
         if let Some(ref tmpl) = templates[midi as usize] {
-            if tmpl.bins.len() < 2 {
-                // Need at least 2 harmonics for a reliable geometric mean
-                // Fall back to simple magnitude for very high pitches
-                let bin = tmpl.bins[0];
-                let lo = bin.saturating_sub(1);
-                let hi = (bin + 1).min(n_bins - 1);
-                energies[midi as usize] =
-                    magnitudes[lo..=hi].iter().copied().fold(0.0f32, f32::max);
-                continue;
-            }
-
-            let mut weighted_log_sum = 0.0f32;
+            let mut weighted_sum = 0.0f32;
             let mut total_weight = 0.0f32;
+            let mut fund_mag = 0.0f32;
 
-            for (&bin, &weight) in tmpl.bins.iter().zip(tmpl.weights.iter()) {
+            for (idx, (&bin, &weight)) in tmpl.bins.iter().zip(tmpl.weights.iter()).enumerate() {
                 let lo = bin.saturating_sub(1);
                 let hi = (bin + 1).min(n_bins - 1);
                 let mag = magnitudes[lo..=hi].iter().copied().fold(0.0f32, f32::max);
 
-                weighted_log_sum += weight * (mag.max(eps)).ln();
+                if idx == 0 {
+                    fund_mag = mag;
+                }
+
+                weighted_sum += weight * mag;
                 total_weight += weight;
             }
 
             if total_weight > 0.0 {
-                energies[midi as usize] = (weighted_log_sum / total_weight).exp();
+                let score = weighted_sum / total_weight;
+                // Fundamental gate: reject pitches whose fundamental is too
+                // weak relative to the score (harmonic-coincidence ghosts).
+                if fund_mag >= score * FUNDAMENTAL_GATE {
+                    energies[midi as usize] = score;
+                }
             }
         }
     }
@@ -372,14 +382,17 @@ pub fn midi_to_hz(midi: u8) -> f32 {
 // Mel-filterbank construction (kept for tests / future use)
 // ---------------------------------------------------------------------------
 
+#[allow(dead_code)]
 pub fn hz_to_mel(hz: f32) -> f32 {
     2595.0 * (1.0 + hz / 700.0).log10()
 }
 
+#[allow(dead_code)]
 pub fn mel_to_hz(mel: f32) -> f32 {
     700.0 * (10f32.powf(mel / 2595.0) - 1.0)
 }
 
+#[allow(dead_code)]
 pub fn build_mel_filterbank(
     n_mels: usize,
     fft_size: usize,

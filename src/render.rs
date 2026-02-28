@@ -22,7 +22,6 @@ use crate::timing::AudioClock;
 // ---------------------------------------------------------------------------
 
 const MAX_NOTE_INSTANCES: usize = 4096;
-const MAX_KEY_INSTANCES: usize = 128;
 const MAX_PARTICLE_INSTANCES: usize = 2048;
 
 const HIT_LINE_Y: f32 = -0.8; // NDC y where notes "land"

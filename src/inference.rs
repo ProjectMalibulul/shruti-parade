@@ -57,10 +57,10 @@ impl InferenceEngine {
         }
 
         // ---- Tuning constants ----
-        // The harmonic sieve produces unnormalised weighted-mean magnitudes.
+        // The harmonic sieve produces weighted arithmetic-mean magnitudes.
         // For a 4096-point FFT of a moderate piano note (amplitude ~0.3),
         // typical pitch energy ≈ 100–600. Silence ≈ 0–5.
-        let abs_min_energy: f32 = 8.0;
+        let abs_min_energy: f32 = 4.0;
         // SNR: energy must exceed noise floor by this factor for onset
         let snr_onset: f32 = 4.0 + self.config.onset_threshold * 6.0; // default: 7.0
                                                                       // Minimum frame-over-frame flux ratio on first detection frame
@@ -87,9 +87,9 @@ impl InferenceEngine {
 
             // ---- 1. Harmonic aliasing suppression ----
             // Suppress pitches that are harmonics of stronger pitches.
-            // Ratio threshold 0.65: keep only if energy ≥ 65% of the fundamental.
+            // Ratio threshold 0.50: keep only if energy ≥ 50% of the fundamental.
             let mut filtered = pitch_energy;
-            dsp::suppress_harmonic_aliasing(&mut filtered, 0.65);
+            dsp::suppress_harmonic_aliasing(&mut filtered, 0.50);
 
             // ---- 2. Local-max filter ±2 semitones ----
             // After aliasing suppression, remove pitches that aren't local peaks.
@@ -110,7 +110,7 @@ impl InferenceEngine {
                 };
                 let mut is_max = true;
                 for q in lo..=hi {
-                    if q != p && pitch_energy[q] > pitch_energy[p] {
+                    if q != p && filtered[q] > filtered[p] {
                         is_max = false;
                         break;
                     }
@@ -125,18 +125,16 @@ impl InferenceEngine {
                 for i in PIANO_LO as usize..=PIANO_HI as usize {
                     noise_floor[i] += 0.2 * (filtered[i] - noise_floor[i]);
                 }
-                for i in 0..N_PITCHES {
-                    prev_energy[i] = filtered[i];
-                }
+                prev_energy[..N_PITCHES].copy_from_slice(&filtered[..N_PITCHES]);
                 continue;
             }
 
             if !warmup_done {
                 warmup_done = true;
-                for i in PIANO_LO as usize..=PIANO_HI as usize {
-                    noise_floor[i] *= 1.5;
-                    if noise_floor[i] < 1.0 {
-                        noise_floor[i] = 1.0;
+                for nf in &mut noise_floor[PIANO_LO as usize..=PIANO_HI as usize] {
+                    *nf *= 1.5;
+                    if *nf < 1.0 {
+                        *nf = 1.0;
                     }
                 }
                 info!("Noise floor calibrated (30 frames)");
