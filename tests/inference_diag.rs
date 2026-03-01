@@ -89,7 +89,7 @@ fn diagnose_single_note_energy_distribution() {
         .map(|p| (p, pitch_energy[p as usize]))
         .filter(|(_, e)| *e > 1.0)
         .collect();
-    energies.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+    energies.sort_by(|a, b| b.1.total_cmp(&a.1));
 
     println!("\nAll pitches with energy > 1.0 (sorted):");
     for (pitch, e) in &energies {

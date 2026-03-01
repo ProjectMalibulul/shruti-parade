@@ -83,6 +83,11 @@ const FUNDAMENTAL_GATE: f32 = 0.10;
 /// Build harmonic templates for all 88 piano keys (MIDI 21–108).
 /// Returns a 128-element Vec indexed by MIDI pitch; entries outside
 /// the piano range are `None`.
+///
+/// **Resolution note**: At 48 kHz / 4096 FFT, bin resolution is ~11.7 Hz.
+/// Low-register notes (A0 = 27.5 Hz, ~2.4 bins) have poor fundamental
+/// resolution but benefit from well-resolved upper harmonics.  Increase
+/// `fft_size` to 8192 for better low-pitch accuracy at the cost of latency.
 pub fn build_harmonic_templates(
     sample_rate: f32,
     fft_size: usize,
@@ -193,7 +198,7 @@ pub fn suppress_harmonic_aliasing(energies: &mut [f32; 128], ratio_threshold: f3
         .filter(|&p| energies[p] > 0.0)
         .map(|p| (p, energies[p]))
         .collect();
-    sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+    sorted.sort_by(|a, b| b.1.total_cmp(&a.1));
 
     let mut suppressed = [false; 128];
 
@@ -317,14 +322,28 @@ impl DspPipeline {
             // ---- collect hop_size new samples ----
             let hop = self.config.hop_size;
             let mut collected = 0usize;
+            let mut empty_streak = 0u32;
+            // ~2 seconds of silence at 200µs back-off ≈ 10_000 iterations
+            const MAX_EMPTY_STREAK: u32 = 10_000;
 
             while collected < hop {
                 match self.consumer.pop() {
                     Ok(s) => {
                         self.circ.push(s);
                         collected += 1;
+                        empty_streak = 0;
                     }
                     Err(_) => {
+                        // Check if the producer has been dropped (stream ended).
+                        if self.consumer.is_abandoned() {
+                            debug!("Audio producer dropped — DSP shutting down");
+                            return;
+                        }
+                        empty_streak += 1;
+                        if empty_streak >= MAX_EMPTY_STREAK {
+                            info!("No audio data for ~2s — DSP shutting down");
+                            return;
+                        }
                         // Ring empty — brief back-off (well under hop period).
                         std::thread::sleep(std::time::Duration::from_micros(200));
                     }

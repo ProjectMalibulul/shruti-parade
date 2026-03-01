@@ -373,6 +373,252 @@ mod dsp_tests {
 }
 
 // ---------------------------------------------------------------------------
+// DSP edge cases (NaN safety, boundary pitches, silent input, etc.)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod dsp_edge_case_tests {
+    use shruti_parade::dsp::*;
+
+    // --- NaN safety ---
+
+    #[test]
+    fn suppress_harmonic_aliasing_nan_no_panic() {
+        let mut energies = [0.0f32; 128];
+        energies[60] = f32::NAN;
+        energies[64] = 100.0;
+        energies[67] = 50.0;
+        // Must not panic — previously used partial_cmp().unwrap()
+        suppress_harmonic_aliasing(&mut energies, 0.50);
+    }
+
+    #[test]
+    fn suppress_harmonic_aliasing_inf_no_panic() {
+        let mut energies = [0.0f32; 128];
+        energies[60] = f32::INFINITY;
+        energies[64] = 100.0;
+        suppress_harmonic_aliasing(&mut energies, 0.50);
+        // INF pitch should remain (strongest)
+        assert!(energies[60].is_infinite());
+    }
+
+    // --- Silent / all-zero input ---
+
+    #[test]
+    fn compute_pitch_energies_all_zero_magnitudes() {
+        let templates = build_harmonic_templates(48000.0, 4096);
+        let magnitudes = vec![0.0f32; 4096 / 2 + 1];
+        let energies = compute_pitch_energies(&magnitudes, &templates);
+        for e in energies.iter() {
+            assert_eq!(*e, 0.0, "Zero magnitudes should yield zero energy");
+        }
+    }
+
+    #[test]
+    fn suppress_harmonic_aliasing_all_zero() {
+        let mut energies = [0.0f32; 128];
+        suppress_harmonic_aliasing(&mut energies, 0.50);
+        for e in energies.iter() {
+            assert_eq!(*e, 0.0);
+        }
+    }
+
+    // --- Boundary pitch templates ---
+
+    #[test]
+    fn template_exists_for_a0() {
+        let templates = build_harmonic_templates(48000.0, 4096);
+        assert!(
+            templates[21].is_some(),
+            "MIDI 21 (A0, 27.5 Hz) should have a template"
+        );
+    }
+
+    #[test]
+    fn template_exists_for_c8() {
+        let templates = build_harmonic_templates(48000.0, 4096);
+        assert!(
+            templates[108].is_some(),
+            "MIDI 108 (C8, 4186 Hz) should have a template"
+        );
+    }
+
+    #[test]
+    fn template_none_outside_piano_range() {
+        let templates = build_harmonic_templates(48000.0, 4096);
+        assert!(templates[0].is_none());
+        assert!(templates[20].is_none());
+        assert!(templates[109].is_none());
+        assert!(templates[127].is_none());
+    }
+
+    #[test]
+    fn a0_template_has_multiple_harmonics() {
+        let templates = build_harmonic_templates(48000.0, 4096);
+        let tmpl = templates[21].as_ref().unwrap();
+        // A0 at 27.5 Hz with 48kHz SR and 4096 FFT:
+        // Harmonics: 27.5, 55, 82.5, 110, 137.5, 165, 192.5, 220
+        // All well below Nyquist (24kHz), so all 8 harmonics should be present
+        assert_eq!(
+            tmpl.bins.len(),
+            8,
+            "A0 should have all 8 harmonics below Nyquist"
+        );
+    }
+
+    #[test]
+    fn c8_template_has_limited_harmonics() {
+        let templates = build_harmonic_templates(48000.0, 4096);
+        let tmpl = templates[108].as_ref().unwrap();
+        // C8 at 4186 Hz: 2nd harmonic = 8372, ..., 5th = 20930, 6th = 25116 (>Nyquist*0.95)
+        // Should have 5 harmonics
+        assert!(
+            tmpl.bins.len() >= 2 && tmpl.bins.len() <= 6,
+            "C8 should have limited harmonics due to Nyquist, got {}",
+            tmpl.bins.len()
+        );
+    }
+
+    // --- midi_to_hz spot checks ---
+
+    #[test]
+    fn midi_to_hz_a4() {
+        assert!((midi_to_hz(69) - 440.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn midi_to_hz_a0() {
+        assert!(
+            (midi_to_hz(21) - 27.5).abs() < 0.1,
+            "A0 should be ~27.5 Hz, got {}",
+            midi_to_hz(21)
+        );
+    }
+
+    #[test]
+    fn midi_to_hz_c8() {
+        let hz = midi_to_hz(108);
+        assert!(
+            (hz - 4186.0).abs() < 1.0,
+            "C8 should be ~4186 Hz, got {}",
+            hz
+        );
+    }
+
+    #[test]
+    fn midi_to_hz_middle_c() {
+        let hz = midi_to_hz(60);
+        assert!(
+            (hz - 261.63).abs() < 0.1,
+            "Middle C should be ~261.63 Hz, got {}",
+            hz
+        );
+    }
+
+    // --- Single-bin spike ---
+
+    #[test]
+    fn single_bin_spike_activates_nearby_pitches_only() {
+        let templates = build_harmonic_templates(48000.0, 4096);
+        let n_bins = 4096 / 2 + 1;
+        let mut magnitudes = vec![0.0f32; n_bins];
+
+        // Spike the bin corresponding to A4's fundamental (440 Hz)
+        let a4_bin = (440.0 * 4096.0 / 48000.0).round() as usize;
+        magnitudes[a4_bin] = 1000.0;
+
+        let energies = compute_pitch_energies(&magnitudes, &templates);
+
+        // MIDI 69 (A4) should have some energy
+        assert!(
+            energies[69] > 0.0,
+            "A4 should have energy from its fundamental bin"
+        );
+
+        // Distant pitches should have zero energy
+        assert_eq!(energies[21], 0.0, "A0 shouldn't be activated by A4's bin");
+    }
+
+    // --- Concurrent note suppression fairness ---
+
+    #[test]
+    fn equal_energy_concurrent_notes_both_survive() {
+        let mut energies = [0.0f32; 128];
+        // C4 and E4 — a major third, not harmonically related
+        energies[60] = 100.0;
+        energies[64] = 100.0;
+        suppress_harmonic_aliasing(&mut energies, 0.50);
+        assert!(
+            energies[60] > 0.0,
+            "C4 should survive with equal energy to E4"
+        );
+        assert!(
+            energies[64] > 0.0,
+            "E4 should survive with equal energy to C4"
+        );
+    }
+
+    #[test]
+    fn perfect_fifth_both_survive_when_strong() {
+        let mut energies = [0.0f32; 128];
+        // C4 and G4 — a perfect fifth
+        energies[60] = 100.0;
+        energies[67] = 80.0; // 80% of C4's energy, above 50% threshold
+        suppress_harmonic_aliasing(&mut energies, 0.50);
+        assert!(energies[60] > 0.0, "C4 should survive (stronger note)");
+        assert!(
+            energies[67] > 0.0,
+            "G4 should survive — energy is above ratio threshold"
+        );
+    }
+
+    #[test]
+    fn weak_harmonic_ghost_suppressed() {
+        let mut energies = [0.0f32; 128];
+        // A4 strong, A5 weak (should be suppressed as harmonic ghost)
+        energies[69] = 100.0; // A4
+        energies[81] = 10.0; // A5 (octave above, 10% energy — below 50% threshold)
+        suppress_harmonic_aliasing(&mut energies, 0.50);
+        assert!(energies[69] > 0.0, "A4 should survive");
+        assert_eq!(
+            energies[81], 0.0,
+            "A5 should be suppressed as harmonic ghost of A4"
+        );
+    }
+
+    // --- Fundamental gate ---
+
+    #[test]
+    fn fundamental_gate_rejects_phantom_pitch() {
+        // Construct magnitudes where a pitch's harmonic bins have energy
+        // but the fundamental bin does NOT — should be rejected by fundamental gate.
+        let templates = build_harmonic_templates(48000.0, 4096);
+        let n_bins = 4096 / 2 + 1;
+        let mut magnitudes = vec![0.0f32; n_bins];
+
+        // A4 (69) fundamental bin
+        let a4_f0_bin = (440.0 * 4096.0 / 48000.0).round() as usize;
+
+        // Put energy ONLY at A4's 2nd harmonic (880 Hz), not at fundamental
+        let a4_h2_bin = (880.0 * 4096.0 / 48000.0).round() as usize;
+        magnitudes[a4_h2_bin] = 1000.0;
+        // Make sure fundamental is empty
+        magnitudes[a4_f0_bin] = 0.0;
+
+        let energies = compute_pitch_energies(&magnitudes, &templates);
+
+        // A4 should have very low or zero energy due to fundamental gate
+        // (only 1 harmonic has energy, fundamental has none)
+        // The fundamental gate requires fund_mag >= score * FUNDAMENTAL_GATE (0.10)
+        // fund_mag = 0, so A4 should be rejected
+        assert_eq!(
+            energies[69], 0.0,
+            "A4 should be rejected: no energy at fundamental"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Render utilities (pitch_to_ndc_x, pitch_to_hue, hsv_to_rgb, piano keys)
 // ---------------------------------------------------------------------------
 

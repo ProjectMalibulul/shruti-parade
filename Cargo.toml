@@ -2,6 +2,8 @@
 name = "shruti-parade"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
+description = "Real-time piano transcription visualiser with FFT harmonic-sieve pitch detection and GPU-accelerated rendering"
 
 [dependencies]
 # Error handling & logging
