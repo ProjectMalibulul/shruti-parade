@@ -524,7 +524,7 @@ mod dsp_edge_case_tests {
         let mut magnitudes = vec![0.0f32; n_bins];
 
         // Spike the bin corresponding to A4's fundamental (440 Hz)
-        let a4_bin = (440.0 * 4096.0 / 48000.0).round() as usize;
+        let a4_bin = (440.0_f32 * 4096.0_f32 / 48000.0_f32).round() as usize;
         magnitudes[a4_bin] = 1000.0;
 
         let energies = compute_pitch_energies(&magnitudes, &templates);
@@ -597,10 +597,10 @@ mod dsp_edge_case_tests {
         let mut magnitudes = vec![0.0f32; n_bins];
 
         // A4 (69) fundamental bin
-        let a4_f0_bin = (440.0 * 4096.0 / 48000.0).round() as usize;
+        let a4_f0_bin = (440.0_f32 * 4096.0_f32 / 48000.0_f32).round() as usize;
 
         // Put energy ONLY at A4's 2nd harmonic (880 Hz), not at fundamental
-        let a4_h2_bin = (880.0 * 4096.0 / 48000.0).round() as usize;
+        let a4_h2_bin = (880.0_f32 * 4096.0_f32 / 48000.0_f32).round() as usize;
         magnitudes[a4_h2_bin] = 1000.0;
         // Make sure fundamental is empty
         magnitudes[a4_f0_bin] = 0.0;
