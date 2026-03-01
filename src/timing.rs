@@ -38,6 +38,12 @@ impl AudioClock {
         self.sample_count.load(Ordering::Acquire)
     }
 
+    /// Force the clock to a specific sample index (used for seek).
+    #[inline]
+    pub fn set_samples(&self, sample: u64) {
+        self.sample_count.store(sample, Ordering::Release);
+    }
+
     /// Convert a sample index to seconds.
     #[inline]
     pub fn sample_to_seconds(&self, sample: u64) -> f64 {

@@ -9,6 +9,7 @@ mod midi_router;
 mod particles;
 mod render;
 mod timing;
+mod transport;
 mod wav_ingest;
 
 use std::path::PathBuf;
@@ -25,6 +26,7 @@ use events::NoteEvent;
 use inference::InferenceEngine;
 use midi_router::MidiRouter;
 use timing::AudioClock;
+use transport::TransportState;
 
 // ---------------------------------------------------------------------------
 // Input mode detection
@@ -76,6 +78,10 @@ fn main() -> Result<()> {
     // ---- render channel (always needed) ----
     let (render_tx, render_rx) = crossbeam_channel::bounded::<NoteEvent>(256);
 
+    // ---- transport controls ----
+    let transport_state = Arc::new(TransportState::new());
+    let (transport_tx, transport_rx) = crossbeam_channel::bounded(64);
+
     // ---- shared audio clock ----
     let clock = Arc::new(AudioClock::new(config.audio.sample_rate));
 
@@ -105,6 +111,8 @@ fn main() -> Result<()> {
             let clock_midi = clock.clone();
             let sr = config.audio.sample_rate;
             let chunk = config.audio.buffer_frames;
+            let transport_state_thread = transport_state.clone();
+            let transport_rx_thread = transport_rx.clone();
             std::thread::Builder::new()
                 .name("midi-file".into())
                 .spawn(move || {
@@ -115,6 +123,8 @@ fn main() -> Result<()> {
                         clock_midi,
                         sr,
                         chunk,
+                        transport_rx_thread,
+                        transport_state_thread,
                     ) {
                         tracing::error!("MIDI file error: {e:#}");
                     }
@@ -144,6 +154,8 @@ fn main() -> Result<()> {
             // T0: audio file ingest
             let clock_af = clock.clone();
             let chunk = config.audio.buffer_frames;
+            let transport_state_thread = transport_state.clone();
+            let transport_rx_thread = transport_rx.clone();
             std::thread::Builder::new()
                 .name("audio-ingest".into())
                 .spawn(move || {
@@ -153,6 +165,8 @@ fn main() -> Result<()> {
                         Some(playback_prod),
                         clock_af,
                         chunk,
+                        transport_rx_thread,
+                        transport_state_thread,
                     ) {
                         tracing::error!("Audio file error: {e:#}");
                     }
@@ -235,7 +249,13 @@ fn main() -> Result<()> {
     }
 
     // ---- T4: render loop (blocks main thread) ----
-    render::run_render(config.render, render_rx, clock)?;
+    render::run_render(
+        config.render,
+        render_rx,
+        clock,
+        transport_tx,
+        transport_state,
+    )?;
 
     info!("Shruti Parade — shutdown complete");
     Ok(())

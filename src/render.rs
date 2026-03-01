@@ -1,12 +1,13 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use crossbeam_channel::Receiver;
+use crossbeam_channel::{Receiver, Sender};
 use wgpu::util::DeviceExt;
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
-use winit::event::WindowEvent;
+use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
+use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
 use crate::config::RenderConfig;
@@ -16,6 +17,7 @@ use crate::events::{
 };
 use crate::particles::ParticleSystem;
 use crate::timing::AudioClock;
+use crate::transport::{TransportCommand, TransportState};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -23,6 +25,7 @@ use crate::timing::AudioClock;
 
 const MAX_NOTE_INSTANCES: usize = 4096;
 const MAX_PARTICLE_INSTANCES: usize = 2048;
+const MAX_UI_INSTANCES: usize = 24;
 
 const HIT_LINE_Y: f32 = -0.8; // NDC y where notes "land"
 const SCROLL_SPEED: f32 = 0.5; // NDC per second
@@ -34,36 +37,45 @@ const PIANO_RANGE: f32 = (PIANO_MAX - PIANO_MIN) as f32;
 const NOTE_CULL_SECONDS: f64 = 12.0;
 const PARTICLE_BURST: usize = 12;
 
+const PLAYBAR_Y: f32 = 0.86;
+const PLAYBAR_WIDTH: f32 = 1.4;
+const PLAYBAR_HEIGHT: f32 = 0.04;
+const PLAYBAR_PADDING: f32 = 0.02;
+const PLAYBAR_HANDLE_WIDTH: f32 = 0.02;
+const PLAY_BUTTON_SIZE: f32 = 0.07;
+const PLAY_BUTTON_X: f32 = -0.85;
+const PLAYBAR_SEEK_SECONDS: f64 = 5.0;
+
 // ---------------------------------------------------------------------------
-// Per-vertex data for the unit quad (two triangles)
+// Playbar layout
 // ---------------------------------------------------------------------------
 
-#[repr(C)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct Vertex {
-    position: [f32; 2],
+#[derive(Clone, Copy)]
+struct Rect {
+    center: [f32; 2],
+    size: [f32; 2],
 }
 
-const QUAD_VERTS: [Vertex; 6] = [
-    Vertex {
-        position: [-0.5, -0.5],
-    },
-    Vertex {
-        position: [0.5, -0.5],
-    },
-    Vertex {
-        position: [0.5, 0.5],
-    },
-    Vertex {
-        position: [-0.5, -0.5],
-    },
-    Vertex {
-        position: [0.5, 0.5],
-    },
-    Vertex {
-        position: [-0.5, 0.5],
-    },
-];
+impl Rect {
+    fn contains(&self, point: [f32; 2]) -> bool {
+        let half_w = self.size[0] * 0.5;
+        let half_h = self.size[1] * 0.5;
+        point[0] >= self.center[0] - half_w
+            && point[0] <= self.center[0] + half_w
+            && point[1] >= self.center[1] - half_h
+            && point[1] <= self.center[1] + half_h
+    }
+
+    fn left(&self) -> f32 {
+        self.center[0] - self.size[0] * 0.5
+    }
+}
+
+#[derive(Clone, Copy)]
+struct PlaybarLayout {
+    bar: Rect,
+    button: Rect,
+}
 
 // ---------------------------------------------------------------------------
 // Public entry point
@@ -73,17 +85,23 @@ pub fn run_render(
     config: RenderConfig,
     event_rx: Receiver<NoteEvent>,
     clock: Arc<AudioClock>,
+    transport_tx: Sender<TransportCommand>,
+    transport_state: Arc<TransportState>,
 ) -> anyhow::Result<()> {
     let event_loop = EventLoop::new()?;
     let mut app = App {
         config,
         event_rx,
         clock,
+        transport_tx,
+        transport_state,
         window: None,
         gpu: None,
         visual_notes: Vec::new(),
         particles: ParticleSystem::new(),
         last_frame: Instant::now(),
+        playbar_dragging: false,
+        cursor_ndc: None,
     };
     event_loop.run_app(&mut app)?;
     Ok(())
@@ -97,11 +115,15 @@ struct App {
     config: RenderConfig,
     event_rx: Receiver<NoteEvent>,
     clock: Arc<AudioClock>,
+    transport_tx: Sender<TransportCommand>,
+    transport_state: Arc<TransportState>,
     window: Option<Arc<Window>>,
     gpu: Option<GpuState>,
     visual_notes: Vec<VisualNote>,
     particles: ParticleSystem,
     last_frame: Instant,
+    playbar_dragging: bool,
+    cursor_ndc: Option<[f32; 2]>,
 }
 
 /// All GPU resources: surface, device, pipelines, buffers, bloom textures.
@@ -125,6 +147,7 @@ struct GpuState {
     vertex_buffer: wgpu::Buffer,
     note_instance_buffer: wgpu::Buffer,
     key_instance_buffer: wgpu::Buffer,
+    ui_instance_buffer: wgpu::Buffer,
     particle_instance_buffer: wgpu::Buffer,
     uniform_buffer: wgpu::Buffer,
 
@@ -280,7 +303,7 @@ fn key_instance_layout() -> wgpu::VertexBufferLayout<'static> {
         wgpu::VertexAttribute {
             offset: 36,
             shader_location: 5,
-            format: wgpu::VertexFormat::Float32x3,
+            format: wgpu::VertexFormat::Float32,
         }, // _pad
     ];
     wgpu::VertexBufferLayout {
@@ -782,6 +805,13 @@ impl GpuState {
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         });
 
+        let ui_instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ui-instances"),
+            size: (MAX_UI_INSTANCES * std::mem::size_of::<KeyInstance>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         let particle_instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("particle-instances"),
             size: (MAX_PARTICLE_INSTANCES * std::mem::size_of::<ParticleInstance>()) as u64,
@@ -809,6 +839,7 @@ impl GpuState {
             vertex_buffer,
             note_instance_buffer,
             key_instance_buffer,
+            ui_instance_buffer,
             particle_instance_buffer,
             uniform_buffer,
             uniform_bind_group,
@@ -865,6 +896,30 @@ impl ApplicationHandler for App {
                     gpu.resize(size);
                 }
             }
+            WindowEvent::CursorMoved { position, .. } => {
+                self.cursor_ndc = self.cursor_to_ndc(position);
+                if self.playbar_dragging {
+                    if let Some(ndc) = self.cursor_ndc {
+                        self.seek_from_ndc(ndc);
+                    }
+                }
+            }
+            WindowEvent::MouseInput { state, button, .. } => {
+                if button == MouseButton::Left {
+                    if state == ElementState::Pressed {
+                        if let Some(ndc) = self.cursor_ndc {
+                            self.handle_playbar_press(ndc);
+                        }
+                    } else {
+                        self.playbar_dragging = false;
+                    }
+                }
+            }
+            WindowEvent::KeyboardInput { event, .. } => {
+                if event.state == ElementState::Pressed {
+                    self.handle_key_input(event.logical_key);
+                }
+            }
             WindowEvent::RedrawRequested => {
                 let now = Instant::now();
                 let dt = now.duration_since(self.last_frame).as_secs_f32();
@@ -887,6 +942,126 @@ impl ApplicationHandler for App {
 // ---------------------------------------------------------------------------
 
 impl App {
+    fn playbar_layout(&self) -> PlaybarLayout {
+        let bar = Rect {
+            center: [0.0, PLAYBAR_Y],
+            size: [PLAYBAR_WIDTH, PLAYBAR_HEIGHT],
+        };
+        let button = Rect {
+            center: [PLAY_BUTTON_X, PLAYBAR_Y],
+            size: [PLAY_BUTTON_SIZE, PLAY_BUTTON_SIZE],
+        };
+        PlaybarLayout { bar, button }
+    }
+
+    fn cursor_to_ndc(&self, position: winit::dpi::PhysicalPosition<f64>) -> Option<[f32; 2]> {
+        let window = self.window.as_ref()?;
+        let size = window.inner_size();
+        if size.width == 0 || size.height == 0 {
+            return None;
+        }
+        let x = (position.x as f32 / size.width as f32) * 2.0 - 1.0;
+        let y = 1.0 - (position.y as f32 / size.height as f32) * 2.0;
+        Some([x, y])
+    }
+
+    fn clear_visuals(&mut self) {
+        self.visual_notes.clear();
+        self.particles.clear();
+    }
+
+    fn handle_playbar_press(&mut self, ndc: [f32; 2]) {
+        if !self.can_seek() {
+            return;
+        }
+        let layout = self.playbar_layout();
+        if layout.button.contains(ndc) {
+            self.toggle_pause();
+            return;
+        }
+        if layout.bar.contains(ndc) {
+            self.playbar_dragging = true;
+            self.seek_from_ndc(ndc);
+        }
+    }
+
+    fn seek_from_ndc(&mut self, ndc: [f32; 2]) {
+        let total_samples = self.transport_state.total_samples();
+        if total_samples == 0 {
+            return;
+        }
+        let layout = self.playbar_layout();
+        let bar_left = layout.bar.left() + PLAYBAR_PADDING;
+        let bar_right = layout.bar.left() + layout.bar.size[0] - PLAYBAR_PADDING;
+        let t = ((ndc[0] - bar_left) / (bar_right - bar_left)).clamp(0.0, 1.0);
+        let target = (t as f64 * total_samples as f64).round() as u64;
+        self.seek_to_samples(target);
+    }
+
+    fn seek_to_samples(&mut self, sample: u64) {
+        if !self.can_seek() {
+            return;
+        }
+        let total_samples = self.transport_state.total_samples();
+        let target = sample.min(total_samples);
+        self.clock.set_samples(target);
+        self.clear_visuals();
+        let _ = self
+            .transport_tx
+            .try_send(TransportCommand::SeekSamples(target));
+    }
+
+    fn seek_by_seconds(&mut self, delta_seconds: f64) {
+        if !self.can_seek() {
+            return;
+        }
+        let sr = self.clock.sample_rate();
+        let delta_samples = (delta_seconds * sr) as i64;
+        let current = self.clock.now_samples() as i64;
+        let total = self.transport_state.total_samples() as i64;
+        let target = (current + delta_samples).clamp(0, total) as u64;
+        self.seek_to_samples(target);
+    }
+
+    fn set_paused(&mut self, paused: bool) {
+        if !self.can_seek() {
+            return;
+        }
+        self.transport_state.set_paused(paused);
+        let cmd = if paused {
+            TransportCommand::Pause
+        } else {
+            TransportCommand::Play
+        };
+        let _ = self.transport_tx.try_send(cmd);
+    }
+
+    fn toggle_pause(&mut self) {
+        let paused = !self.transport_state.is_paused();
+        self.set_paused(paused);
+    }
+
+    fn handle_key_input(&mut self, key: Key) {
+        if !self.can_seek() {
+            return;
+        }
+        match key {
+            Key::Named(NamedKey::Space) => self.toggle_pause(),
+            Key::Named(NamedKey::ArrowLeft) => self.seek_by_seconds(-PLAYBAR_SEEK_SECONDS),
+            Key::Named(NamedKey::ArrowRight) => self.seek_by_seconds(PLAYBAR_SEEK_SECONDS),
+            Key::Named(NamedKey::Home) => self.seek_to_samples(0),
+            Key::Named(NamedKey::End) => {
+                let total = self.transport_state.total_samples();
+                self.seek_to_samples(total);
+            }
+            _ => {}
+        }
+    }
+
+    fn can_seek(&self) -> bool {
+        self.transport_state.total_samples() > 0
+    }
+
     fn update_notes(&mut self, dt: f32) {
         while let Ok(ev) = self.event_rx.try_recv() {
             let t = self.clock.sample_to_seconds(ev.sample_time);
@@ -1046,6 +1221,97 @@ impl App {
                 &gpu.particle_instance_buffer,
                 0,
                 bytemuck::cast_slice(&particle_instances[..particle_count]),
+            );
+        }
+
+        // ---- build playbar instances ----
+        let mut ui_instances: Vec<KeyInstance> = Vec::new();
+        let total_samples = self.transport_state.total_samples();
+        let can_seek = total_samples > 0;
+        let is_paused = self.transport_state.is_paused();
+        let layout = self.playbar_layout();
+
+        let bar_color = if can_seek {
+            [0.10, 0.11, 0.14, 0.85]
+        } else {
+            [0.08, 0.08, 0.09, 0.5]
+        };
+        ui_instances.push(KeyInstance {
+            position: layout.bar.center,
+            size: layout.bar.size,
+            color: bar_color,
+            border_radius: 0.35,
+            _pad: [0.0; 3],
+        });
+
+        if can_seek {
+            let progress = (self.clock.now_samples().min(total_samples) as f32)
+                / (total_samples as f32).max(1.0);
+            let bar_left = layout.bar.left() + PLAYBAR_PADDING;
+            let bar_width = (layout.bar.size[0] - PLAYBAR_PADDING * 2.0).max(0.0);
+            let fill_w = (bar_width * progress).max(0.002);
+            let fill_x = bar_left + fill_w * 0.5;
+
+            ui_instances.push(KeyInstance {
+                position: [fill_x, layout.bar.center[1]],
+                size: [fill_w, layout.bar.size[1] * 0.55],
+                color: [0.35, 0.70, 1.0, 0.9],
+                border_radius: 0.35,
+                _pad: [0.0; 3],
+            });
+
+            let handle_x = bar_left + bar_width * progress;
+            ui_instances.push(KeyInstance {
+                position: [handle_x, layout.bar.center[1]],
+                size: [PLAYBAR_HANDLE_WIDTH, layout.bar.size[1] * 0.9],
+                color: [0.9, 0.9, 0.95, 0.95],
+                border_radius: 0.3,
+                _pad: [0.0; 3],
+            });
+        }
+
+        ui_instances.push(KeyInstance {
+            position: layout.button.center,
+            size: layout.button.size,
+            color: [0.15, 0.16, 0.20, if can_seek { 0.9 } else { 0.5 }],
+            border_radius: 0.35,
+            _pad: [0.0; 3],
+        });
+
+        if can_seek {
+            if is_paused {
+                ui_instances.push(KeyInstance {
+                    position: layout.button.center,
+                    size: [layout.button.size[0] * 0.35, layout.button.size[1] * 0.45],
+                    color: [0.85, 0.90, 0.95, 0.95],
+                    border_radius: 0.2,
+                    _pad: [0.0; 3],
+                });
+            } else {
+                let offset = layout.button.size[0] * 0.18;
+                ui_instances.push(KeyInstance {
+                    position: [layout.button.center[0] - offset, layout.button.center[1]],
+                    size: [layout.button.size[0] * 0.18, layout.button.size[1] * 0.5],
+                    color: [0.85, 0.90, 0.95, 0.95],
+                    border_radius: 0.2,
+                    _pad: [0.0; 3],
+                });
+                ui_instances.push(KeyInstance {
+                    position: [layout.button.center[0] + offset, layout.button.center[1]],
+                    size: [layout.button.size[0] * 0.18, layout.button.size[1] * 0.5],
+                    color: [0.85, 0.90, 0.95, 0.95],
+                    border_radius: 0.2,
+                    _pad: [0.0; 3],
+                });
+            }
+        }
+
+        let ui_count = ui_instances.len().min(MAX_UI_INSTANCES);
+        if ui_count > 0 {
+            gpu.queue.write_buffer(
+                &gpu.ui_instance_buffer,
+                0,
+                bytemuck::cast_slice(&ui_instances[..ui_count]),
             );
         }
 
@@ -1239,6 +1505,28 @@ impl App {
                 pass.set_bind_group(1, &gpu.uniform_bind_group, &[]);
                 pass.draw(0..3, 0..1);
             }
+        }
+
+        if ui_count > 0 {
+            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("ui-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &final_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&gpu.key_pipeline);
+            pass.set_bind_group(0, &gpu.uniform_bind_group, &[]);
+            pass.set_vertex_buffer(0, gpu.vertex_buffer.slice(..));
+            pass.set_vertex_buffer(1, gpu.ui_instance_buffer.slice(..));
+            pass.draw(0..6, 0..ui_count as u32);
         }
 
         gpu.queue.submit(std::iter::once(enc.finish()));

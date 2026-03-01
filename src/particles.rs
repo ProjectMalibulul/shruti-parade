@@ -78,6 +78,10 @@ impl ParticleSystem {
             .collect()
     }
 
+    pub fn clear(&mut self) {
+        self.particles.clear();
+    }
+
     #[allow(dead_code)]
     pub fn count(&self) -> usize {
         self.particles.len()

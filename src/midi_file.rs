@@ -5,10 +5,11 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use crossbeam_channel::Sender;
+use crossbeam_channel::{Receiver, Sender};
 use tracing::info;
 
 use crate::events::{NoteEvent, NoteEventKind};
+use crate::transport::{TransportCommand, TransportState};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Tempo map (tick → seconds conversion with mid-song tempo changes)
@@ -185,6 +186,8 @@ pub fn stream_midi_file(
     clock: std::sync::Arc<crate::timing::AudioClock>,
     sample_rate: u32,
     chunk_size: usize,
+    transport_rx: Receiver<TransportCommand>,
+    transport_state: std::sync::Arc<TransportState>,
 ) -> Result<()> {
     let data = std::fs::read(path)
         .with_context(|| format!("Cannot read MIDI file: {}", path.display()))?;
@@ -282,10 +285,52 @@ pub fn stream_midi_file(
         std::time::Duration::from_secs_f64(chunk_size as f64 / sample_rate as f64);
     // Extra 1s after last note for release tails
     let end_sample = last_sample + sample_rate as u64;
+    transport_state.set_total_samples(end_sample);
 
     let mut audio_buf = vec![0.0f32; chunk_size];
+    let mut paused = transport_state.is_paused();
+
+    let mut seek_event_index = |target: u64| -> usize {
+        let mut lo = 0usize;
+        let mut hi = events.len();
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            if events[mid].sample_time < target {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        lo
+    };
 
     while current_sample < end_sample {
+        while let Ok(cmd) = transport_rx.try_recv() {
+            match cmd {
+                TransportCommand::Play => {
+                    paused = false;
+                    transport_state.set_paused(false);
+                }
+                TransportCommand::Pause => {
+                    paused = true;
+                    transport_state.set_paused(true);
+                }
+                TransportCommand::SeekSamples(sample) => {
+                    let target = sample.min(end_sample);
+                    current_sample = target;
+                    clock.set_samples(target);
+                    event_idx = seek_event_index(target);
+                    synth = Synth::new(sample_rate);
+                    audio_buf.fill(0.0);
+                }
+            }
+        }
+
+        if paused {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            continue;
+        }
+
         let chunk_end = current_sample + chunk_size as u64;
 
         // Emit note events whose time falls within this chunk

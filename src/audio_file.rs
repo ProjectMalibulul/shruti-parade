@@ -4,6 +4,7 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use crossbeam_channel::Receiver;
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::DecoderOptions;
 use symphonia::core::formats::FormatOptions;
@@ -11,6 +12,8 @@ use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 use tracing::info;
+
+use crate::transport::{TransportCommand, TransportState};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -134,11 +137,42 @@ pub fn stream_audio_file(
     mut playback_producer: Option<rtrb::Producer<f32>>,
     clock: std::sync::Arc<crate::timing::AudioClock>,
     chunk_size: usize,
+    transport_rx: Receiver<TransportCommand>,
+    transport_state: std::sync::Arc<TransportState>,
 ) -> Result<()> {
     let (mono, sr) = decode_audio_file(path)?;
-    let sleep_per_chunk = std::time::Duration::from_secs_f64(chunk_size as f64 / sr as f64);
+    transport_state.set_total_samples(mono.len() as u64);
 
-    for chunk in mono.chunks(chunk_size) {
+    let mut cursor: usize = 0;
+    let mut paused = transport_state.is_paused();
+
+    while cursor < mono.len() {
+        while let Ok(cmd) = transport_rx.try_recv() {
+            match cmd {
+                TransportCommand::Play => {
+                    paused = false;
+                    transport_state.set_paused(false);
+                }
+                TransportCommand::Pause => {
+                    paused = true;
+                    transport_state.set_paused(true);
+                }
+                TransportCommand::SeekSamples(sample) => {
+                    let target = sample.min(mono.len() as u64) as usize;
+                    cursor = target;
+                    clock.set_samples(target as u64);
+                }
+            }
+        }
+
+        if paused {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            continue;
+        }
+
+        let chunk_end = (cursor + chunk_size).min(mono.len());
+        let chunk = &mono[cursor..chunk_end];
+
         for &sample in chunk {
             while producer.push(sample).is_err() {
                 std::hint::spin_loop();
@@ -149,7 +183,11 @@ pub fn stream_audio_file(
                 }
             }
         }
+
         clock.advance(chunk.len() as u64);
+        cursor = chunk_end;
+
+        let sleep_per_chunk = std::time::Duration::from_secs_f64(chunk.len() as f64 / sr as f64);
         std::thread::sleep(sleep_per_chunk);
     }
 
