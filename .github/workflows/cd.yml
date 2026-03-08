@@ -1,0 +1,162 @@
+name: CD
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main, master]
+  workflow_dispatch:
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Gate: only proceed if the triggering CI run actually passed.
+  # workflow_dispatch bypasses this (manual override).
+  check-ci:
+    name: Verify CI passed
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      should-run: ${{ steps.gate.outputs.should-run }}
+    steps:
+      - name: Gate on CI conclusion
+        id: gate
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "should-run=true" >> "$GITHUB_OUTPUT"
+          elif [[ "${{ github.event.workflow_run.conclusion }}" == "success" ]]; then
+            echo "should-run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "should-run=false" >> "$GITHUB_OUTPUT"
+            echo "CI did not pass (conclusion: ${{ github.event.workflow_run.conclusion }}). Skipping CD."
+          fi
+
+  build-release:
+    name: Build (${{ matrix.label }})
+    needs: check-ci
+    if: needs.check-ci.outputs.should-run == 'true'
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            label: linux-ubuntu-22.04
+            binary: shruti-parade
+            archive: shruti-parade-linux-ubuntu-22.04.tar.gz
+          - os: ubuntu-24.04
+            label: linux-ubuntu-24.04
+            binary: shruti-parade
+            archive: shruti-parade-linux-ubuntu-24.04.tar.gz
+          - os: macos-15
+            label: macos-15-arm64
+            binary: shruti-parade
+            archive: shruti-parade-macos-15-arm64.tar.gz
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Check out the commit that triggered CI, not whatever is on HEAD now.
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            libasound2-dev \
+            libwayland-dev \
+            libxkbcommon-dev \
+            libegl-dev \
+            libgl-dev \
+            pkg-config
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.os }}
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Package archive
+        run: |
+          cp target/release/${{ matrix.binary }} ${{ matrix.binary }}
+          tar -czf ${{ matrix.archive }} \
+            ${{ matrix.binary }} \
+            README.md \
+            LICENSE
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.label }}
+          path: ${{ matrix.archive }}
+          retention-days: 7
+
+  publish:
+    name: Publish GitHub Release
+    needs: build-release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts/
+
+      - name: Derive release tag
+        id: tag
+        run: |
+          SHA="${{ github.event.workflow_run.head_sha || github.sha }}"
+          SHORT="${SHA::7}"
+          echo "tag=dev-${SHORT}" >> "$GITHUB_OUTPUT"
+          echo "name=Dev build ${SHORT}" >> "$GITHUB_OUTPUT"
+
+      - name: Delete previous dev release (if exists)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Remove stale dev release so we don't accumulate hundreds of them.
+          # Fails silently if none exists yet.
+          gh release delete "${{ steps.tag.outputs.tag }}" \
+            --repo "${{ github.repository }}" \
+            --yes 2>/dev/null || true
+          git push origin ":refs/tags/${{ steps.tag.outputs.tag }}" 2>/dev/null || true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: ${{ steps.tag.outputs.name }}
+          prerelease: true
+          draft: false
+          generate_release_notes: true
+          target_commitish: ${{ github.event.workflow_run.head_sha || github.sha }}
+          body: |
+            Automated build from commit ${{ github.event.workflow_run.head_sha || github.sha }}.
+
+            **This is a development pre-release**, not a stable release.
+            To create a stable release, push a version tag: `git tag v1.0.0 && git push origin v1.0.0`
+
+            ### Downloads
+            | Platform | Archive |
+            |---|---|
+            | Ubuntu 22.04 (x86_64) | `shruti-parade-linux-ubuntu-22.04.tar.gz` |
+            | Ubuntu 24.04 (x86_64) | `shruti-parade-linux-ubuntu-24.04.tar.gz` |
+            | macOS 15 Sequoia (ARM64) | `shruti-parade-macos-15-arm64.tar.gz` |
+          files: release-artifacts/**/*.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
