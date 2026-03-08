@@ -34,10 +34,10 @@ use transport::TransportState;
 // ---------------------------------------------------------------------------
 
 enum InputMode {
-    AudioFile(PathBuf),          // WAV, MP3, FLAC, OGG, …
+    AudioFile(PathBuf),           // WAV, MP3, FLAC, OGG, …
     AudioFileBasicPitch(PathBuf), // Audio → basic-pitch MIDI transcription
-    MidiFile(PathBuf),           // .mid / .midi
-    LiveCapture,                 // microphone
+    MidiFile(PathBuf),            // .mid / .midi
+    LiveCapture,                  // microphone
 }
 
 fn detect_mode(args: &[String]) -> InputMode {

@@ -354,9 +354,9 @@ mod inference_tests {
         // Collect all events
         let events: Vec<NoteEvent> = event_rx.try_iter().collect();
 
-        let has_note_off = events.iter().any(|e| {
-            e.kind == NoteEventKind::NoteOff && e.pitch == target_pitch
-        });
+        let has_note_off = events
+            .iter()
+            .any(|e| e.kind == NoteEventKind::NoteOff && e.pitch == target_pitch);
         assert!(
             has_note_off,
             "Expected NoteOff for pitch {target_pitch}, got events: {events:?}"

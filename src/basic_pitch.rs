@@ -3,9 +3,9 @@
 //! basic-pitch is a Python package that uses a neural network to transcribe
 //! audio to MIDI.  We invoke it as a subprocess and read the resulting MIDI file.
 
+use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use anyhow::{Context, Result};
 use tracing::info;
 
 /// Transcribe an audio file to MIDI using the basic-pitch CLI.
@@ -49,12 +49,12 @@ pub fn transcribe_to_midi(audio_path: &Path, output_dir: &Path) -> Result<PathBu
     let midi_path = output_dir.join(format!("{stem}_basic_pitch.mid"));
 
     if !midi_path.exists() {
-        anyhow::bail!(
-            "Expected MIDI output not found: {}",
-            midi_path.display()
-        );
+        anyhow::bail!("Expected MIDI output not found: {}", midi_path.display());
     }
 
-    info!("basic-pitch transcription complete: {}", midi_path.display());
+    info!(
+        "basic-pitch transcription complete: {}",
+        midi_path.display()
+    );
     Ok(midi_path)
 }

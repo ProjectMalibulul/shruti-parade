@@ -61,12 +61,24 @@ struct Vertex {
 /// Unit quad as two triangles (TriangleList). Covers [-1,1] in both axes.
 /// Instanced pipelines scale and translate this per-instance.
 const QUAD_VERTS: [Vertex; 6] = [
-    Vertex { position: [-1.0, -1.0] },
-    Vertex { position: [ 1.0, -1.0] },
-    Vertex { position: [ 1.0,  1.0] },
-    Vertex { position: [-1.0, -1.0] },
-    Vertex { position: [ 1.0,  1.0] },
-    Vertex { position: [-1.0,  1.0] },
+    Vertex {
+        position: [-1.0, -1.0],
+    },
+    Vertex {
+        position: [1.0, -1.0],
+    },
+    Vertex {
+        position: [1.0, 1.0],
+    },
+    Vertex {
+        position: [-1.0, -1.0],
+    },
+    Vertex {
+        position: [1.0, 1.0],
+    },
+    Vertex {
+        position: [-1.0, 1.0],
+    },
 ];
 
 // ---------------------------------------------------------------------------

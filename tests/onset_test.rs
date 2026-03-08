@@ -93,9 +93,7 @@ fn onset_fires_on_impulse() {
     // Collect events (non-blocking)
     let events: Vec<NoteEvent> = event_rx.try_iter().collect();
 
-    let has_note_on = events
-        .iter()
-        .any(|e| e.kind == NoteEventKind::NoteOn);
+    let has_note_on = events.iter().any(|e| e.kind == NoteEventKind::NoteOn);
 
     assert!(
         has_note_on,

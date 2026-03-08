@@ -418,11 +418,7 @@ pub fn mpm_pitch(signal: &[f32], sample_rate: f32, clarity_threshold: f32) -> Op
 /// pitch within ±1 semitone. Pitches confirmed by MPM get a confidence
 /// boost; unconfirmed pitches get mildly attenuated. This improves low-
 /// pitch accuracy where FFT bin resolution is poor.
-pub fn refine_with_mpm(
-    energies: &mut [f32; 128],
-    signal: &[f32],
-    sample_rate: f32,
-) {
+pub fn refine_with_mpm(energies: &mut [f32; 128], signal: &[f32], sample_rate: f32) {
     let mpm_hz = match mpm_pitch(signal, sample_rate, 0.4) {
         Some(f) => f,
         None => return, // no clear pitch — leave energies unchanged
@@ -739,8 +735,7 @@ mod dsp_tests {
         // Apply Hann window
         let mut windowed = signal.clone();
         for (i, s) in windowed.iter_mut().enumerate() {
-            let w =
-                0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / FFT_SIZE as f32).cos());
+            let w = 0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / FFT_SIZE as f32).cos());
             *s *= w;
         }
 
