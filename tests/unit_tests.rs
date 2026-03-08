@@ -627,21 +627,24 @@ mod render_util_tests {
     use shruti_parade::render::*;
 
     #[test]
-    fn piano_min_maps_to_minus_one() {
+    fn piano_min_maps_to_first_key() {
         let x = pitch_to_ndc_x(21); // A0 = PIANO_MIN
+                                    // Key-aligned: first white key center = -1.0 + 0.5 * (2.0/52.0)
+        let expected = -1.0 + 0.5 * (2.0 / 52.0);
         assert!(
-            (x - (-1.0)).abs() < 1e-6,
-            "PIANO_MIN should map to -1.0, got {x}"
+            (x - expected).abs() < 1e-5,
+            "PIANO_MIN should map to first key center {expected}, got {x}"
         );
     }
 
     #[test]
-    fn piano_max_maps_to_near_plus_one() {
+    fn piano_max_maps_to_last_key() {
         let x = pitch_to_ndc_x(108); // C8 = PIANO_MAX
-                                     // Should be close to +1.0 (exactly 2.0 * 87.0 / 87.0 - 1.0 = 1.0)
+                                     // Key-aligned: white key index 51, center = -1.0 + 51.5 * (2.0/52.0)
+        let expected = -1.0 + 51.5 * (2.0 / 52.0);
         assert!(
-            (x - 1.0).abs() < 1e-6,
-            "PIANO_MAX should map to +1.0, got {x}"
+            (x - expected).abs() < 1e-5,
+            "PIANO_MAX should map to last key center {expected}, got {x}"
         );
     }
 
@@ -653,11 +656,11 @@ mod render_util_tests {
     }
 
     #[test]
-    fn hue_range_is_0_to_360() {
+    fn hue_range_is_0_to_300() {
         let hue_min = pitch_to_hue(21);
         let hue_max = pitch_to_hue(108);
         assert!((hue_min - 0.0).abs() < 1e-6);
-        assert!((hue_max - 360.0).abs() < 1e-6);
+        assert!((hue_max - 300.0).abs() < 1e-6);
     }
 
     #[test]

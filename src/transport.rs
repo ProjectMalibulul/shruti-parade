@@ -12,6 +12,12 @@ pub struct TransportState {
     total_samples: AtomicU64,
 }
 
+impl Default for TransportState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TransportState {
     pub fn new() -> Self {
         Self {

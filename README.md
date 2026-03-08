@@ -1,9 +1,10 @@
 # Shruti Parade
 
-**Real-time piano transcription visualiser** — listens to audio (live mic, WAV/MP3/FLAC/OGG, or MIDI file), detects notes via FFT-based harmonic-sieve pitch detection, and renders falling-note visuals with GPU-accelerated bloom and particle effects.
+**Real-time piano transcription visualiser** — listens to audio (live mic, WAV/MP3/FLAC/OGG, or MIDI file), detects notes via dual-FFT harmonic-sieve + MPM pitch detection, and renders falling-note visuals with GPU-accelerated bloom and particle effects.
 
 ![Rust](https://img.shields.io/badge/Rust-2021_Edition-orange)
 ![License](https://img.shields.io/badge/license-MIT-blue)
+[![CI](https://github.com/ProjectMalibulul/shruti-parade/actions/workflows/ci.yml/badge.svg)](https://github.com/ProjectMalibulul/shruti-parade/actions/workflows/ci.yml)
 
 ---
 
@@ -11,13 +12,17 @@
 
 | Feature | Description |
 |---------|-------------|
-| **Harmonic-sieve pitch detection** | FFT → weighted harmonic template matching across all 88 piano keys (MIDI 21–108) |
+| **Dual-FFT harmonic-sieve detection** | Standard 4096-pt FFT for mid/treble + 8192-pt FFT for bass, with weighted harmonic template matching across all 88 piano keys (MIDI 21–108) |
+| **MPM pitch refinement** | McLeod Pitch Method refines per-key confidence scores for improved accuracy |
+| **Inharmonicity correction** | Stretched-partial compensation for realistic piano overtone series |
 | **Three input modes** | Live microphone, audio files (WAV/MP3/FLAC/OGG via symphonia), MIDI files (via midly) |
-| **GPU-accelerated rendering** | wgpu-powered falling-note visualiser with SDF rounded-rect notes, hit-line, and piano keyboard |
-| **Bloom post-processing** | Multi-pass Gaussian bloom (threshold → H-blur → V-blur → composite) |
+| **GPU-accelerated rendering** | wgpu-powered falling-note visualiser with SDF rounded-rect notes, piano keyboard, and register-based colour palette |
+| **Bloom post-processing** | Multi-pass Gaussian bloom (threshold → H-blur → V-blur → composite) with pulsing hit-line |
 | **Particle effects** | Impact particles spawn at note onsets with gravity, drag, and fade |
+| **Sustain pedal simulation** | Automatic pedal engagement detection with visual indicator bar |
 | **Lock-free audio pipeline** | `rtrb` SPSC ring buffers for real-time audio → DSP data flow |
 | **Multi-threaded architecture** | Separate threads for audio I/O, DSP, inference, MIDI routing, and rendering |
+| **Transport controls** | Play/pause, seek (click/drag progress bar, arrow keys, Home/End) |
 | **MIDI file synthesis** | Built-in multi-voice sine synthesiser for MIDI playback |
 
 ## Architecture
@@ -25,16 +30,17 @@
 ```
 ┌──────────────┐     rtrb ring      ┌──────────────┐   crossbeam    ┌──────────────┐
 │  Audio I/O   │ ──── (f32) ──────▶ │     DSP      │ ── channel ──▶│  Inference   │
-│  (cpal /     │                    │  (FFT +      │  (PitchFrame) │  (onset /    │
-│   symphonia) │                    │   harmonic   │               │   offset)    │
-└──────────────┘                    │   sieve)     │               └──────┬───────┘
-       │                            └──────────────┘                      │
-       │  rtrb ring                                                NoteEvent channel
-       ▼                                                                  │
-┌──────────────┐                                                   ┌──────▼───────┐
-│  Playback    │                                                   │  MIDI Router │
-│  (cpal out)  │                                                   └──────┬───────┘
-└──────────────┘                                                          │
+│  (cpal /     │                    │  (dual FFT + │  (PitchFrame) │  (onset /    │
+│   symphonia) │                    │   MPM +      │               │   offset +   │
+└──────────────┘                    │   sieve)     │               │   pedal sim) │
+       │                            └──────────────┘               └──────┬───────┘
+       │  rtrb ring                                                       │
+       ▼                                                           NoteEvent channel
+┌──────────────┐                                                          │
+│  Playback    │                                                   ┌──────▼───────┐
+│  (cpal out)  │                                                   │  MIDI Router │
+└──────────────┘                                                   └──────┬───────┘
+                                                                          │
                                                                    ┌──────▼───────┐
                                                                    │   Renderer   │
                                                                    │  (wgpu /     │
@@ -71,6 +77,16 @@ cargo run --release -- path/to/song.wav
 cargo run --release -- path/to/piece.mid
 ```
 
+## Controls
+
+| Key / Action | Description |
+|---|---|
+| **Space** | Play / Pause |
+| **←** / **→** | Seek ±5 seconds |
+| **Home** / **End** | Jump to start / end |
+| **Click progress bar** | Seek to position |
+| **Drag handle** | Scrub through audio |
+
 ## Configuration
 
 Default settings are in [`src/config.rs`](src/config.rs):
@@ -80,13 +96,19 @@ Default settings are in [`src/config.rs`](src/config.rs):
 | `audio` | `sample_rate` | 48000 | Audio sample rate (Hz) |
 | `audio` | `buffer_frames` | 512 | Audio callback buffer size |
 | `audio` | `ring_capacity` | 48000 | SPSC ring buffer capacity (samples) |
-| `dsp` | `fft_size` | 4096 | FFT window size (power of 2) |
+| `dsp` | `fft_size` | 4096 | Standard FFT window (mid/treble) |
+| `dsp` | `bass_fft_size` | 8192 | Bass FFT window (MIDI 21–47) |
 | `dsp` | `hop_size` | 512 | Hop between FFT frames |
 | `inference` | `onset_threshold` | 0.5 | Note-on sensitivity (0–1, lower = more sensitive) |
 | `inference` | `frame_threshold` | 0.3 | Note-off sensitivity |
 | `render` | `width` × `height` | 1280 × 720 | Window size |
 | `render` | `bloom_enabled` | true | GPU bloom post-processing |
 | `render` | `particles_enabled` | true | Impact particle effects |
+
+## CI / Release
+
+- **CI** runs on every push/PR to `main`: formatting check, Clippy lints, build + test matrix across Ubuntu 22.04, Ubuntu 24.04, and macOS 13.
+- **Release** workflow triggers on `v*` tags, builds release binaries for Linux (x86_64), Windows (x86_64), and macOS (aarch64), then uploads them as GitHub Release assets.
 
 ## Testing
 
@@ -113,14 +135,15 @@ src/
 ├── audio.rs         # cpal audio capture & playback (real-time safe)
 ├── audio_file.rs    # symphonia-based audio file decoding & streaming
 ├── config.rs        # Configuration structs with defaults
-├── dsp.rs           # FFT pipeline, harmonic sieve, pitch energy computation
+├── dsp.rs           # Dual-FFT pipeline, harmonic sieve, MPM pitch refinement
 ├── events.rs        # Event types (NoteEvent, GPU instance structs)
-├── inference.rs     # Onset/offset detector on pitch energy frames
+├── inference.rs     # Onset/offset detector with sustain pedal simulation
 ├── midi_file.rs     # MIDI file parser + sine synthesiser
 ├── midi_router.rs   # Fan-out note events to renderer (+ future MIDI out)
 ├── particles.rs     # CPU-side particle system with gravity & drag
-├── render.rs        # wgpu renderer (falling notes, keys, bloom, particles)
+├── render.rs        # wgpu renderer (falling notes, keys, bloom, particles, UI)
 ├── timing.rs        # Lock-free AudioClock (atomic sample counter)
+├── transport.rs     # Play/pause/seek state (lock-free atomics)
 ├── wav_ingest.rs    # Legacy hound-based WAV loader (unused, kept for reference)
 └── shaders/
     ├── notes.wgsl   # Instanced geometry shader (notes, keys, particles)
@@ -129,10 +152,10 @@ src/
 
 ## Known Limitations
 
-- **Low-pitch resolution**: At 48 kHz / 4096 FFT, frequency bin resolution is ~11.7 Hz. Notes below ~C2 (65 Hz) have only a few bins per fundamental. Increase `fft_size` to 8192 for better low-pitch accuracy at the cost of latency.
-- **Inharmonicity**: The harmonic sieve assumes perfect integer harmonic ratios. Real piano strings exhibit slight inharmonicity (stretched partials), especially at extreme registers.
-- **No sustain pedal**: Pedal events from MIDI files are parsed but not currently visualised.
+- **Low-pitch resolution**: Even with the 8192-pt bass FFT, notes below ~A1 (55 Hz) have limited frequency resolution. The MPM refinement helps but cannot fully overcome the Heisenberg-like time/frequency trade-off.
+- **Inharmonicity model**: Uses a simplified inharmonicity coefficient. Real piano strings vary per-note; the current model uses a per-register approximation.
 - **Sleep-based pacing**: Audio file streaming uses `thread::sleep` for real-time pacing, which is approximate. The ring buffer provides jitter tolerance.
+- **No GPU text rendering**: FPS counter and transport status are shown as indicator bars rather than text labels.
 
 ## License
 

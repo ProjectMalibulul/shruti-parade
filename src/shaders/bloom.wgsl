@@ -106,8 +106,9 @@ fn fs_bloom_composite(in: FullscreenOutput) -> @location(0) vec4<f32> {
 fn fs_hitline(in: FullscreenOutput) -> @location(0) vec4<f32> {
     let line_y = 0.9;
     let dist = abs(in.uv.y - line_y);
-    let core = smoothstep(0.003, 0.0, dist);
-    let glow = exp(-dist * dist / 0.0004) * 0.4;
+    let pulse = 1.0 + 0.15 * sin(frame.time * 2.5);
+    let core = smoothstep(0.003, 0.0, dist) * pulse;
+    let glow = exp(-dist * dist / 0.0006) * 0.5 * pulse;
     let intensity = core + glow;
-    return vec4<f32>(0.6, 0.8, 1.0, intensity);
+    return vec4<f32>(0.55, 0.80, 1.0, intensity);
 }

@@ -1255,17 +1255,17 @@ impl App {
             // activity. Active notes glow brightly; recently-released notes fade.
             let heat_y = -0.835; // just above piano keys
             let heat_h = 0.012;
-            let key_w = 2.0 / PIANO_RANGE;
+            let key_w = 2.0 / 52.0;
             for note in &self.visual_notes {
                 if note.pitch < PIANO_MIN || note.pitch > PIANO_MAX {
                     continue;
                 }
-                let intensity = if note.end_time.is_none() {
-                    (note.velocity as f32 / 127.0).clamp(0.3, 1.0)
-                } else {
+                let intensity = if let Some(end) = note.end_time {
                     // Fade out recently-released notes
-                    let elapsed = (now - note.end_time.unwrap()) as f32;
+                    let elapsed = (now - end) as f32;
                     (1.0 - elapsed * 2.0).max(0.0) * 0.5
+                } else {
+                    (note.velocity as f32 / 127.0).clamp(0.3, 1.0)
                 };
                 if intensity < 0.01 {
                     continue;
@@ -1295,7 +1295,12 @@ impl App {
             }
 
             let x = pitch_to_ndc_x(note.pitch);
-            let note_w = 2.0 / PIANO_RANGE * 0.8;
+            let white_w = 2.0 / 52.0;
+            let note_w = if is_black_key(note.pitch) {
+                white_w * 0.55 * 0.85
+            } else {
+                white_w * 0.85
+            };
 
             let y_top = HIT_LINE_Y + (now - note.start_time) as f32 * SCROLL_SPEED;
             let y_bot = match note.end_time {
@@ -1307,7 +1312,7 @@ impl App {
             let y_c = (y_top + y_bot) / 2.0;
 
             let hue = pitch_to_hue(note.pitch);
-            let (r, g, b) = hsv_to_rgb(hue, 0.75, 0.85);
+            let (r, g, b) = hsv_to_rgb(hue, 0.80, 0.90);
             let a = (note.velocity as f32 / 127.0).clamp(0.4, 1.0);
 
             let is_active = note.end_time.is_none();
@@ -1317,7 +1322,7 @@ impl App {
                 size: [note_w, note_h],
                 color: [r, g, b, a],
                 border_radius: 0.2,
-                glow_intensity: if is_active { 0.8 } else { 0.2 },
+                glow_intensity: if is_active { 1.0 } else { 0.15 },
                 _pad: [0.0; 2],
             });
 
@@ -1366,9 +1371,9 @@ impl App {
         let layout = self.playbar_layout();
 
         let bar_color = if can_seek {
-            [0.10, 0.11, 0.14, 0.85]
+            [0.08, 0.09, 0.13, 0.85]
         } else {
-            [0.08, 0.08, 0.09, 0.5]
+            [0.06, 0.06, 0.08, 0.5]
         };
         ui_instances.push(KeyInstance {
             position: layout.bar.center,
@@ -1414,34 +1419,43 @@ impl App {
 
         if can_seek {
             if is_paused {
+                // Play triangle — rendered as a right-pointing arrow using
+                // a wide rectangle (approximation via rounded rect)
+                let tri_w = layout.button.size[0] * 0.30;
+                let tri_h = layout.button.size[1] * 0.50;
                 ui_instances.push(KeyInstance {
-                    position: layout.button.center,
-                    size: [layout.button.size[0] * 0.35, layout.button.size[1] * 0.45],
-                    color: [0.85, 0.90, 0.95, 0.95],
-                    border_radius: 0.2,
+                    position: [
+                        layout.button.center[0] + tri_w * 0.08,
+                        layout.button.center[1],
+                    ],
+                    size: [tri_w, tri_h],
+                    color: [0.85, 0.92, 1.0, 0.95],
+                    border_radius: 0.25,
                     _pad: [0.0; 3],
                 });
             } else {
-                let offset = layout.button.size[0] * 0.18;
+                // Pause bars
+                let offset = layout.button.size[0] * 0.16;
+                let bar_w = layout.button.size[0] * 0.14;
+                let bar_h = layout.button.size[1] * 0.50;
                 ui_instances.push(KeyInstance {
                     position: [layout.button.center[0] - offset, layout.button.center[1]],
-                    size: [layout.button.size[0] * 0.18, layout.button.size[1] * 0.5],
-                    color: [0.85, 0.90, 0.95, 0.95],
-                    border_radius: 0.2,
+                    size: [bar_w, bar_h],
+                    color: [0.85, 0.92, 1.0, 0.95],
+                    border_radius: 0.15,
                     _pad: [0.0; 3],
                 });
                 ui_instances.push(KeyInstance {
                     position: [layout.button.center[0] + offset, layout.button.center[1]],
-                    size: [layout.button.size[0] * 0.18, layout.button.size[1] * 0.5],
-                    color: [0.85, 0.90, 0.95, 0.95],
-                    border_radius: 0.2,
+                    size: [bar_w, bar_h],
+                    color: [0.85, 0.92, 1.0, 0.95],
+                    border_radius: 0.15,
                     _pad: [0.0; 3],
                 });
             }
         }
 
         // ---- FPS counter bar (top-right corner) ----
-        // Width proportional to FPS: full width at 120 FPS, half at 60.
         {
             let fps_fraction = (self.current_fps / 120.0).clamp(0.0, 1.0);
             let bar_max_w = 0.12;
@@ -1449,13 +1463,14 @@ impl App {
             let bar_h = 0.015;
             let bar_x = 0.93 - (bar_max_w - bar_w) * 0.5;
             let bar_y = 0.97;
-            // Green when >55 FPS, yellow <55, red <30
-            let (fr, fg, fb) = if self.current_fps >= 55.0 {
-                (0.2, 0.9, 0.3)
-            } else if self.current_fps >= 30.0 {
-                (0.9, 0.8, 0.2)
+            // Smooth gradient: red (0 FPS) → yellow (45 FPS) → green (60+ FPS)
+            let t = (self.current_fps / 60.0).clamp(0.0, 1.0);
+            let (fr, fg, fb) = if t < 0.5 {
+                let s = t * 2.0;
+                (0.9, 0.2 + 0.6 * s, 0.2)
             } else {
-                (0.9, 0.2, 0.2)
+                let s = (t - 0.5) * 2.0;
+                (0.9 - 0.7 * s, 0.8 + 0.1 * s, 0.2 + 0.1 * s)
             };
             // Background
             ui_instances.push(KeyInstance {
@@ -1708,11 +1723,32 @@ impl App {
 // ---------------------------------------------------------------------------
 
 pub fn pitch_to_ndc_x(pitch: u8) -> f32 {
+    let white_width = 2.0 / 52.0;
+    let mut white_idx = 0u32;
+    let mut last_white_x = -1.0 + 0.5 * white_width;
+
+    for midi in PIANO_MIN..=pitch.min(PIANO_MAX) {
+        if is_black_key(midi) {
+            if midi == pitch {
+                return last_white_x + white_width * 0.5;
+            }
+        } else {
+            last_white_x = -1.0 + (white_idx as f32 + 0.5) * white_width;
+            if midi == pitch {
+                return last_white_x;
+            }
+            white_idx += 1;
+        }
+    }
+    // Fallback for out-of-range pitches
     -1.0 + 2.0 * (pitch.saturating_sub(PIANO_MIN)) as f32 / PIANO_RANGE
 }
 
 pub fn pitch_to_hue(pitch: u8) -> f32 {
-    ((pitch.saturating_sub(PIANO_MIN)) as f32 / PIANO_RANGE) * 360.0
+    // Register-based palette: bass=warm reds, middle=cyan/blue, treble=violet
+    let t = (pitch.saturating_sub(PIANO_MIN)) as f32 / PIANO_RANGE;
+    // Map [0,1] to [0°, 300°] so bass starts warm and treble ends cool
+    t * 300.0
 }
 
 pub fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (f32, f32, f32) {

@@ -179,6 +179,7 @@ struct TimedEvent {
 /// * Events are sent to `render_tx` for visualisation.
 /// * Simple sine audio is synthesised and pushed to `playback_producer`.
 /// * `clock` is advanced in lockstep so the renderer stays synchronised.
+#[allow(clippy::too_many_arguments)]
 pub fn stream_midi_file(
     path: &Path,
     render_tx: Sender<NoteEvent>,
@@ -302,7 +303,7 @@ pub fn stream_midi_file(
     let mut audio_buf = vec![0.0f32; chunk_size];
     let mut paused = transport_state.is_paused();
 
-    let mut seek_event_index = |target: u64| -> usize {
+    let seek_event_index = |target: u64| -> usize {
         let mut lo = 0usize;
         let mut hi = events.len();
         while lo < hi {

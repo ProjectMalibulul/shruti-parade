@@ -54,7 +54,6 @@ impl InferenceEngine {
 
         // Sustain pedal simulation: detect when multiple notes overlap
         // (typical of pedaled passages) and extend their release window.
-        let mut pedal_held = false;
         let mut sustained_notes: HashSet<u8> = HashSet::new();
         let mut active_frames = [0u32; N_PITCHES];
         // When ≥3 notes overlap for ≥4 frames, engage simulated pedal
@@ -157,7 +156,7 @@ impl InferenceEngine {
             let long_active = (PIANO_LO as usize..=PIANO_HI as usize)
                 .filter(|&i| active[i] && active_frames[i] >= PEDAL_ENGAGE_FRAMES)
                 .count();
-            pedal_held = long_active >= PEDAL_OVERLAP_THRESHOLD;
+            let pedal_held = long_active >= PEDAL_OVERLAP_THRESHOLD;
 
             for pitch in PIANO_LO..=PIANO_HI {
                 let i = pitch as usize;

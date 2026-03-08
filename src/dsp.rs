@@ -341,15 +341,15 @@ fn find_nsdf_key_maxima(nsdf: &[f32]) -> Vec<(usize, f32)> {
         start += 1;
     }
 
-    for tau in start..nsdf.len() {
-        if nsdf[tau] > 0.0 {
+    for (tau, &val) in nsdf.iter().enumerate().skip(start) {
+        if val > 0.0 {
             if !positive_region {
                 positive_region = true;
                 best_lag = tau;
-                best_val = nsdf[tau];
-            } else if nsdf[tau] > best_val {
+                best_val = val;
+            } else if val > best_val {
                 best_lag = tau;
-                best_val = nsdf[tau];
+                best_val = val;
             }
         } else if positive_region {
             // End of positive hump — record its peak
@@ -621,7 +621,9 @@ impl DspPipeline {
                 .pitch_tx
                 .send(PitchFrame {
                     pitch_energy,
-                    sample_offset: self.sample_count,
+                    sample_offset: self
+                        .sample_count
+                        .saturating_sub(self.config.fft_size as u64 / 2),
                 })
                 .is_err()
             {
