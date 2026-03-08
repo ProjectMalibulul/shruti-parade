@@ -104,9 +104,6 @@ fn main() -> Result<()> {
         let transport_state = Arc::new(TransportState::new());
         let (transport_tx, transport_rx) = crossbeam_channel::bounded(64);
 
-        // ---- shared audio clock ----
-        let clock = Arc::new(AudioClock::new(config.audio.sample_rate));
-
         // ---- playback ring (4× capacity for jitter headroom) ----
         let playback_capacity = config.audio.ring_capacity * 4;
         let (playback_prod, playback_cons) = rtrb::RingBuffer::new(playback_capacity);
@@ -115,12 +112,18 @@ fn main() -> Result<()> {
         let _playback_handle: Option<AudioPlayback>;
         let _audio_handle: Option<AudioCapture>;
 
+        // ---- shared audio clock (created per-mode with correct sample rate) ----
+        let clock: Arc<AudioClock>;
+
         match mode {
             // ══════════════════════════════════════════════════════════════════
             // MIDI file: parse → events straight to render, sine-synth playback
             // ══════════════════════════════════════════════════════════════════
             InputMode::MidiFile(path) => {
                 info!("Loading MIDI file: {}", path.display());
+
+                // Synth is digital — clock and playback both run at the engine SR
+                clock = Arc::new(AudioClock::new(config.audio.sample_rate));
 
                 // Start cpal output at the engine's sample rate (synth is digital)
                 _playback_handle = Some(AudioPlayback::start(
@@ -158,6 +161,9 @@ fn main() -> Result<()> {
             // ══════════════════════════════════════════════════════════════════
             InputMode::AudioFileBasicPitch(path) => {
                 info!("Transcribing with basic-pitch: {}", path.display());
+
+                // Synth is digital — clock and playback both run at the engine SR
+                clock = Arc::new(AudioClock::new(config.audio.sample_rate));
 
                 let tmp_dir = std::env::temp_dir().join("shruti-parade");
                 let midi_path = basic_pitch::transcribe_to_midi(&path, &tmp_dir)?;
@@ -203,9 +209,11 @@ fn main() -> Result<()> {
                 let (pitch_tx, pitch_rx) = crossbeam_channel::bounded::<PitchFrame>(64);
                 let (event_tx, event_rx) = crossbeam_channel::bounded::<NoteEvent>(256);
 
-                // Playback at the file's native sample rate
+                // Clock must match the file's native SR so that
+                // now_seconds() = samples / file_sr = correct wall-clock time.
                 let file_sr = audio_file::audio_file_sample_rate(&path)?;
                 info!("Audio file native sample rate: {file_sr} Hz");
+                clock = Arc::new(AudioClock::new(file_sr));
                 _playback_handle = Some(AudioPlayback::start(
                     file_sr,
                     config.audio.buffer_frames,
@@ -266,6 +274,9 @@ fn main() -> Result<()> {
             // ══════════════════════════════════════════════════════════════════
             InputMode::LiveCapture => {
                 info!("Using live audio capture");
+
+                // Live capture uses the configured engine SR
+                clock = Arc::new(AudioClock::new(config.audio.sample_rate));
 
                 let (audio_prod, audio_cons) = rtrb::RingBuffer::new(config.audio.ring_capacity);
                 let (pitch_tx, pitch_rx) = crossbeam_channel::bounded::<PitchFrame>(64);

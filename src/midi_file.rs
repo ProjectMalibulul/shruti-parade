@@ -344,6 +344,16 @@ pub fn stream_midi_file(
             continue;
         }
 
+        // Ring-occupancy pacing: wait until the playback ring has room
+        // before pushing. This avoids the blocking spin_loop that would
+        // deadlock when the ring fills faster than the cpal callback drains.
+        if let Some(ref pb) = playback_producer {
+            if pb.slots() < chunk_size {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                continue;
+            }
+        }
+
         let chunk_end = current_sample + chunk_size as u64;
 
         // Emit note events whose time falls within this chunk
@@ -365,12 +375,10 @@ pub fn stream_midi_file(
         // Render synthesised audio for this chunk
         synth.render(&mut audio_buf);
 
-        // Push to playback ring
+        // Push to playback ring (non-blocking, drop on full — matches audio_file pattern)
         if let Some(ref mut pb) = playback_producer {
             for &s in &audio_buf {
-                while pb.push(s).is_err() {
-                    std::hint::spin_loop();
-                }
+                let _ = pb.push(s);
             }
         }
 

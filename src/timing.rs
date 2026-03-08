@@ -39,9 +39,10 @@ impl AudioClock {
     }
 
     /// Force the clock to a specific sample index (used for seek).
+    /// Uses SeqCst to ensure all threads see the new value immediately.
     #[inline]
     pub fn set_samples(&self, sample: u64) {
-        self.sample_count.store(sample, Ordering::Release);
+        self.sample_count.store(sample, Ordering::SeqCst);
     }
 
     /// Convert a sample index to seconds.
