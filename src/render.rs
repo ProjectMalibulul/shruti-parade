@@ -22,6 +22,25 @@ use crate::timing::AudioClock;
 use crate::transport::{TransportCommand, TransportState};
 
 // ---------------------------------------------------------------------------
+// Backend handle types (for hot-reloading files without restarting EventLoop)
+// ---------------------------------------------------------------------------
+
+/// All per-file backend state that the renderer needs.
+/// Dropping this causes old backend threads to exit (channels close).
+pub struct BackendHandles {
+    pub event_rx: Receiver<NoteEvent>,
+    pub clock: Arc<AudioClock>,
+    pub transport_tx: Sender<TransportCommand>,
+    pub transport_state: Arc<TransportState>,
+    /// Type-erased keepalive handles (AudioPlayback, etc.)
+    pub _keepalive: Vec<Box<dyn std::any::Any>>,
+}
+
+/// Closure that spawns backend threads for a given file path.
+/// Passed from main.rs so render.rs doesn't depend on audio/midi modules.
+pub type SpawnBackendFn = Box<dyn Fn(Option<std::path::PathBuf>) -> anyhow::Result<BackendHandles>>;
+
+// ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
@@ -30,7 +49,7 @@ const MAX_PARTICLE_INSTANCES: usize = 2048;
 const MAX_UI_INSTANCES: usize = 256;
 const MAX_KEY_INSTANCES: usize = 384; // 88 keys + pedal + heat bar + key names
 
-const HIT_LINE_Y: f32 = -0.8; // NDC y where notes "land"
+const HIT_LINE_Y: f32 = -0.73; // NDC y where notes "land" (above piano top at -0.77)
 const SCROLL_SPEED: f32 = 0.5; // NDC per second
 
 const PIANO_MIN: u8 = 21; // A0
@@ -124,19 +143,19 @@ struct PlaybarLayout {
 
 pub fn run_render(
     config: RenderConfig,
-    event_rx: Receiver<NoteEvent>,
-    clock: Arc<AudioClock>,
-    transport_tx: Sender<TransportCommand>,
-    transport_state: Arc<TransportState>,
+    initial_handles: BackendHandles,
     pending_file: Arc<Mutex<Option<PathBuf>>>,
+    spawn_fn: SpawnBackendFn,
 ) -> anyhow::Result<()> {
     let event_loop = EventLoop::new()?;
     let mut app = App {
         config,
-        event_rx,
-        clock,
-        transport_tx,
-        transport_state,
+        event_rx: initial_handles.event_rx,
+        clock: initial_handles.clock,
+        transport_tx: initial_handles.transport_tx,
+        transport_state: initial_handles.transport_state,
+        _backend_keepalive: initial_handles._keepalive,
+        spawn_fn,
         window: None,
         gpu: None,
         visual_notes: Vec::new(),
@@ -166,6 +185,8 @@ struct App {
     clock: Arc<AudioClock>,
     transport_tx: Sender<TransportCommand>,
     transport_state: Arc<TransportState>,
+    _backend_keepalive: Vec<Box<dyn std::any::Any>>,
+    spawn_fn: SpawnBackendFn,
     window: Option<Arc<Window>>,
     gpu: Option<GpuState>,
     visual_notes: Vec<VisualNote>,
@@ -1036,8 +1057,7 @@ impl ApplicationHandler for App {
             WindowEvent::DroppedFile(path) => {
                 self.hovered_file = false;
                 tracing::info!("File dropped: {}", path.display());
-                *self.pending_file.lock().unwrap() = Some(path);
-                event_loop.exit();
+                self.reload_file(path);
             }
             WindowEvent::HoveredFile(_) => {
                 self.hovered_file = true;
@@ -1047,9 +1067,10 @@ impl ApplicationHandler for App {
             }
             WindowEvent::RedrawRequested => {
                 // Check if rfd picker thread delivered a file
-                if self.pending_file.lock().unwrap().is_some() {
-                    event_loop.exit();
-                    return;
+                let picked = self.pending_file.lock().unwrap().take();
+                if let Some(path) = picked {
+                    tracing::info!("File picked: reloading with {}", path.display());
+                    self.reload_file(path);
                 }
                 let now = Instant::now();
                 let dt = now.duration_since(self.last_frame).as_secs_f32();
@@ -1111,6 +1132,27 @@ impl App {
         self.pedal_held = false;
         // Drain stale events that were queued before the seek.
         while self.event_rx.try_recv().is_ok() {}
+    }
+
+    /// Hot-reload: stop old backend, spawn new one for the given file.
+    fn reload_file(&mut self, path: PathBuf) {
+        // Drop old backend keepalive handles (stops old cpal streams, threads exit)
+        self._backend_keepalive.clear();
+
+        match (self.spawn_fn)(Some(path)) {
+            Ok(handles) => {
+                self.event_rx = handles.event_rx;
+                self.clock = handles.clock;
+                self.transport_tx = handles.transport_tx;
+                self.transport_state = handles.transport_state;
+                self._backend_keepalive = handles._keepalive;
+                self.clear_visuals();
+                tracing::info!("Backend reloaded successfully");
+            }
+            Err(e) => {
+                tracing::error!("Failed to reload backend: {e:#}");
+            }
+        }
     }
 
     fn handle_playbar_press(&mut self, ndc: [f32; 2]) {
@@ -1368,7 +1410,7 @@ impl App {
             // ---- Pitch confidence heat bar ----
             // Thin colored bars above the piano keyboard showing per-pitch
             // activity. Active notes glow brightly; recently-released notes fade.
-            let heat_y = -0.835; // just above piano keys
+            let heat_y = -0.76; // just above piano keys, below hit-line
             let heat_h = 0.012;
             let key_w = 2.0 / 52.0;
             for note in &self.visual_notes {
@@ -1442,7 +1484,7 @@ impl App {
 
             note_instances.push(NoteInstance {
                 position: [x, y_c],
-                size: [note_w, note_h],
+                size: [note_w, note_h * 0.5],
                 color: [r, g, b, a],
                 border_radius: 0.3,
                 glow_intensity: if is_active { 1.2 } else { 0.12 },
@@ -1459,7 +1501,7 @@ impl App {
             let (lr, lg, lb) = hsv_to_rgb(label_hue, 1.0, 1.0);
             note_instances.push(NoteInstance {
                 position: [x, label_y],
-                size: [note_w, label_h],
+                size: [note_w, label_h * 0.5],
                 color: [lr, lg, lb, a.min(0.9)],
                 border_radius: 0.0,
                 glow_intensity: 0.0,

@@ -105,7 +105,7 @@ fn fs_bloom_composite(in: FullscreenOutput) -> @location(0) vec4<f32> {
 // Improved hit-line with subtle rainbow shimmer and wider glow
 @fragment
 fn fs_hitline(in: FullscreenOutput) -> @location(0) vec4<f32> {
-    let line_y = 0.9;
+    let line_y = 0.865;
     let dist = abs(in.uv.y - line_y);
     let pulse = 1.0 + 0.12 * sin(frame.time * 2.5);
 

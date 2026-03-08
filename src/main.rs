@@ -100,259 +100,232 @@ fn main() -> Result<()> {
     );
 
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let mut mode = detect_mode(&args);
+    let initial_mode = detect_mode(&args);
 
     let pending_file: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
 
-    loop {
-        // ---- render channel (always needed) ----
-        let (render_tx, render_rx) = crossbeam_channel::bounded::<NoteEvent>(256);
+    // Spawn backend for initial mode
+    let initial_handles = spawn_backend(&config, initial_mode)?;
 
-        // ---- transport controls ----
-        let transport_state = Arc::new(TransportState::new());
-        let (transport_tx, transport_rx) = crossbeam_channel::bounded(64);
+    // Build the spawn closure that render.rs calls on file reload
+    let config_for_spawn = config.clone();
+    let spawn_fn: render::SpawnBackendFn = Box::new(move |path: Option<PathBuf>| {
+        let mode = match path {
+            Some(p) => detect_mode_from_path(p),
+            None => InputMode::LiveCapture,
+        };
+        spawn_backend(&config_for_spawn, mode)
+    });
 
-        // ---- playback ring (stereo interleaved: 2 samples/frame, 4× jitter headroom) ----
-        let playback_capacity = config.audio.ring_capacity * 4 * 2;
-        let (playback_prod, playback_cons) = rtrb::RingBuffer::new(playback_capacity);
-
-        // Keep handles alive so streams aren't dropped
-        let _playback_handle: Option<AudioPlayback>;
-        let _audio_handle: Option<AudioCapture>;
-
-        // ---- shared audio clock (created per-mode with correct sample rate) ----
-        let clock: Arc<AudioClock>;
-
-        match mode {
-            // ══════════════════════════════════════════════════════════════════
-            // MIDI file: parse → events straight to render, sine-synth playback
-            // ══════════════════════════════════════════════════════════════════
-            InputMode::MidiFile(path) => {
-                info!("Loading MIDI file: {}", path.display());
-
-                // Synth is digital — clock and playback both run at the engine SR
-                clock = Arc::new(AudioClock::new(config.audio.sample_rate));
-
-                // Start cpal output at the engine's sample rate (synth is digital)
-                _playback_handle = Some(AudioPlayback::start(
-                    config.audio.sample_rate,
-                    config.audio.buffer_frames,
-                    playback_cons,
-                    clock.clone(),
-                    transport_state.clone(),
-                )?);
-                _audio_handle = None;
-
-                let clock_midi = clock.clone();
-                let audio_cfg = config.audio.clone();
-                let transport_state_thread = transport_state.clone();
-                let transport_rx_thread = transport_rx.clone();
-                std::thread::Builder::new()
-                    .name("midi-file".into())
-                    .spawn(move || {
-                        if let Err(e) = midi_file::stream_midi_file(
-                            &path,
-                            render_tx,
-                            Some(playback_prod),
-                            clock_midi,
-                            &audio_cfg,
-                            transport_rx_thread,
-                            transport_state_thread,
-                        ) {
-                            tracing::error!("MIDI file error: {e:#}");
-                        }
-                    })?;
-            }
-
-            // ══════════════════════════════════════════════════════════════════
-            // Audio file + basic-pitch: transcribe to MIDI, then play as MIDI
-            // ══════════════════════════════════════════════════════════════════
-            InputMode::AudioFileBasicPitch(path) => {
-                info!("Transcribing with basic-pitch: {}", path.display());
-
-                // Synth is digital — clock and playback both run at the engine SR
-                clock = Arc::new(AudioClock::new(config.audio.sample_rate));
-
-                let tmp_dir = std::env::temp_dir().join("shruti-parade");
-                let midi_path = basic_pitch::transcribe_to_midi(&path, &tmp_dir)?;
-                info!("Using transcribed MIDI: {}", midi_path.display());
-
-                _playback_handle = Some(AudioPlayback::start(
-                    config.audio.sample_rate,
-                    config.audio.buffer_frames,
-                    playback_cons,
-                    clock.clone(),
-                    transport_state.clone(),
-                )?);
-                _audio_handle = None;
-
-                let clock_bp = clock.clone();
-                let audio_cfg = config.audio.clone();
-                let transport_state_thread = transport_state.clone();
-                let transport_rx_thread = transport_rx.clone();
-                std::thread::Builder::new()
-                    .name("basic-pitch-midi".into())
-                    .spawn(move || {
-                        if let Err(e) = midi_file::stream_midi_file(
-                            &midi_path,
-                            render_tx,
-                            Some(playback_prod),
-                            clock_bp,
-                            &audio_cfg,
-                            transport_rx_thread,
-                            transport_state_thread,
-                        ) {
-                            tracing::error!("basic-pitch MIDI playback error: {e:#}");
-                        }
-                    })?;
-            }
-
-            // ══════════════════════════════════════════════════════════════════
-            // Audio file (WAV/MP3/FLAC/OGG): full DSP → inference pipeline
-            // ══════════════════════════════════════════════════════════════════
-            InputMode::AudioFile(path) => {
-                info!("Loading audio file: {}", path.display());
-
-                let (audio_prod, audio_cons) = rtrb::RingBuffer::new(config.audio.ring_capacity);
-                let (pitch_tx, pitch_rx) = crossbeam_channel::bounded::<PitchFrame>(64);
-                let (event_tx, event_rx) = crossbeam_channel::bounded::<NoteEvent>(256);
-
-                // Clock must match the file's native SR so that
-                // now_seconds() = samples / file_sr = correct wall-clock time.
-                let file_sr = audio_file::audio_file_sample_rate(&path)?;
-                info!("Audio file native sample rate: {file_sr} Hz");
-                clock = Arc::new(AudioClock::new(file_sr));
-                _playback_handle = Some(AudioPlayback::start(
-                    file_sr,
-                    config.audio.buffer_frames,
-                    playback_cons,
-                    clock.clone(),
-                    transport_state.clone(),
-                )?);
-                _audio_handle = None;
-
-                // T0: audio file ingest
-                let clock_af = clock.clone();
-                let chunk = config.audio.buffer_frames;
-                let transport_state_thread = transport_state.clone();
-                let transport_rx_thread = transport_rx.clone();
-                std::thread::Builder::new()
-                    .name("audio-ingest".into())
-                    .spawn(move || {
-                        if let Err(e) = audio_file::stream_audio_file(
-                            &path,
-                            audio_prod,
-                            Some(playback_prod),
-                            clock_af,
-                            chunk,
-                            transport_rx_thread,
-                            transport_state_thread,
-                        ) {
-                            tracing::error!("Audio file error: {e:#}");
-                        }
-                    })?;
-
-                // T1: DSP — use the file's actual sample rate for correct frequency mapping
-                let dsp_cfg = config.dsp.clone();
-                std::thread::Builder::new()
-                    .name("dsp".into())
-                    .spawn(move || {
-                        let mut pipe = DspPipeline::new(dsp_cfg, audio_cons, pitch_tx, file_sr);
-                        pipe.run();
-                    })?;
-
-                // T2: inference
-                let inf_cfg = config.inference.clone();
-                std::thread::Builder::new()
-                    .name("inference".into())
-                    .spawn(move || {
-                        let mut eng = InferenceEngine::new(inf_cfg, pitch_rx, event_tx);
-                        eng.run();
-                    })?;
-
-                // T3: MIDI router
-                std::thread::Builder::new()
-                    .name("midi-router".into())
-                    .spawn(move || {
-                        let router = MidiRouter::new(event_rx, render_tx);
-                        router.run();
-                    })?;
-            }
-
-            // ══════════════════════════════════════════════════════════════════
-            // Live microphone capture: full DSP → inference pipeline
-            // ══════════════════════════════════════════════════════════════════
-            InputMode::LiveCapture => {
-                info!("Using live audio capture");
-
-                // Live capture uses the configured engine SR
-                clock = Arc::new(AudioClock::new(config.audio.sample_rate));
-
-                let (audio_prod, audio_cons) = rtrb::RingBuffer::new(config.audio.ring_capacity);
-                let (pitch_tx, pitch_rx) = crossbeam_channel::bounded::<PitchFrame>(64);
-                let (event_tx, event_rx) = crossbeam_channel::bounded::<NoteEvent>(256);
-
-                _playback_handle = None;
-                drop(playback_cons);
-                drop(playback_prod);
-
-                _audio_handle = Some(AudioCapture::start(
-                    &config.audio,
-                    clock.clone(),
-                    audio_prod,
-                )?);
-
-                // T1: DSP — live capture uses the configured sample rate
-                let dsp_cfg = config.dsp.clone();
-                let sr = config.audio.sample_rate;
-                std::thread::Builder::new()
-                    .name("dsp".into())
-                    .spawn(move || {
-                        let mut pipe = DspPipeline::new(dsp_cfg, audio_cons, pitch_tx, sr);
-                        pipe.run();
-                    })?;
-
-                // T2: inference
-                let inf_cfg = config.inference.clone();
-                std::thread::Builder::new()
-                    .name("inference".into())
-                    .spawn(move || {
-                        let mut eng = InferenceEngine::new(inf_cfg, pitch_rx, event_tx);
-                        eng.run();
-                    })?;
-
-                // T3: MIDI router
-                std::thread::Builder::new()
-                    .name("midi-router".into())
-                    .spawn(move || {
-                        let router = MidiRouter::new(event_rx, render_tx);
-                        router.run();
-                    })?;
-            }
-        }
-
-        // ---- T4: render loop (blocks main thread) ----
-        render::run_render(
-            config.render.clone(),
-            render_rx,
-            clock,
-            transport_tx,
-            transport_state,
-            pending_file.clone(),
-        )?;
-
-        // Check if the user dropped / picked a new file
-        let new_file = pending_file.lock().unwrap().take();
-        if let Some(path) = new_file {
-            info!("Reloading with new file: {}", path.display());
-            mode = detect_mode_from_path(path);
-            // Pipeline threads exit naturally when channels/rings are dropped
-            continue;
-        }
-
-        break;
-    } // end loop
+    // Run render loop — blocks until window close (event loop never restarts)
+    render::run_render(
+        config.render.clone(),
+        initial_handles,
+        pending_file,
+        spawn_fn,
+    )?;
 
     info!("Shruti Parade — shutdown complete");
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Backend spawning (used for initial load and hot-reload)
+// ---------------------------------------------------------------------------
+
+fn spawn_backend(config: &EngineConfig, mode: InputMode) -> Result<render::BackendHandles> {
+    let (render_tx, render_rx) = crossbeam_channel::bounded::<NoteEvent>(256);
+    let transport_state = Arc::new(TransportState::new());
+    let (transport_tx, transport_rx) = crossbeam_channel::bounded(64);
+
+    let playback_capacity = config.audio.ring_capacity * 4 * 2;
+    let (playback_prod, playback_cons) = rtrb::RingBuffer::new(playback_capacity);
+
+    let mut keepalive: Vec<Box<dyn std::any::Any>> = Vec::new();
+    let clock: Arc<AudioClock>;
+
+    match mode {
+        InputMode::MidiFile(path) => {
+            info!("Loading MIDI file: {}", path.display());
+            clock = Arc::new(AudioClock::new(config.audio.sample_rate));
+
+            let pb = AudioPlayback::start(
+                config.audio.sample_rate,
+                config.audio.buffer_frames,
+                playback_cons,
+                clock.clone(),
+                transport_state.clone(),
+            )?;
+            keepalive.push(Box::new(pb));
+
+            let clock_midi = clock.clone();
+            let audio_cfg = config.audio.clone();
+            let transport_state_thread = transport_state.clone();
+            let transport_rx_thread = transport_rx.clone();
+            std::thread::Builder::new()
+                .name("midi-file".into())
+                .spawn(move || {
+                    if let Err(e) = midi_file::stream_midi_file(
+                        &path,
+                        render_tx,
+                        Some(playback_prod),
+                        clock_midi,
+                        &audio_cfg,
+                        transport_rx_thread,
+                        transport_state_thread,
+                    ) {
+                        tracing::error!("MIDI file error: {e:#}");
+                    }
+                })?;
+        }
+
+        InputMode::AudioFileBasicPitch(path) => {
+            info!("Transcribing with basic-pitch: {}", path.display());
+            clock = Arc::new(AudioClock::new(config.audio.sample_rate));
+
+            let tmp_dir = std::env::temp_dir().join("shruti-parade");
+            let midi_path = basic_pitch::transcribe_to_midi(&path, &tmp_dir)?;
+            info!("Using transcribed MIDI: {}", midi_path.display());
+
+            let pb = AudioPlayback::start(
+                config.audio.sample_rate,
+                config.audio.buffer_frames,
+                playback_cons,
+                clock.clone(),
+                transport_state.clone(),
+            )?;
+            keepalive.push(Box::new(pb));
+
+            let clock_bp = clock.clone();
+            let audio_cfg = config.audio.clone();
+            let transport_state_thread = transport_state.clone();
+            let transport_rx_thread = transport_rx.clone();
+            std::thread::Builder::new()
+                .name("basic-pitch-midi".into())
+                .spawn(move || {
+                    if let Err(e) = midi_file::stream_midi_file(
+                        &midi_path,
+                        render_tx,
+                        Some(playback_prod),
+                        clock_bp,
+                        &audio_cfg,
+                        transport_rx_thread,
+                        transport_state_thread,
+                    ) {
+                        tracing::error!("basic-pitch MIDI playback error: {e:#}");
+                    }
+                })?;
+        }
+
+        InputMode::AudioFile(path) => {
+            info!("Loading audio file: {}", path.display());
+
+            let (audio_prod, audio_cons) = rtrb::RingBuffer::new(config.audio.ring_capacity);
+            let (pitch_tx, pitch_rx) = crossbeam_channel::bounded::<PitchFrame>(64);
+            let (event_tx, event_rx) = crossbeam_channel::bounded::<NoteEvent>(256);
+
+            let file_sr = audio_file::audio_file_sample_rate(&path)?;
+            info!("Audio file native sample rate: {file_sr} Hz");
+            clock = Arc::new(AudioClock::new(file_sr));
+
+            let pb = AudioPlayback::start(
+                file_sr,
+                config.audio.buffer_frames,
+                playback_cons,
+                clock.clone(),
+                transport_state.clone(),
+            )?;
+            keepalive.push(Box::new(pb));
+
+            let clock_af = clock.clone();
+            let chunk = config.audio.buffer_frames;
+            let transport_state_thread = transport_state.clone();
+            let transport_rx_thread = transport_rx.clone();
+            std::thread::Builder::new()
+                .name("audio-ingest".into())
+                .spawn(move || {
+                    if let Err(e) = audio_file::stream_audio_file(
+                        &path,
+                        audio_prod,
+                        Some(playback_prod),
+                        clock_af,
+                        chunk,
+                        transport_rx_thread,
+                        transport_state_thread,
+                    ) {
+                        tracing::error!("Audio file error: {e:#}");
+                    }
+                })?;
+
+            let dsp_cfg = config.dsp.clone();
+            std::thread::Builder::new()
+                .name("dsp".into())
+                .spawn(move || {
+                    let mut pipe = DspPipeline::new(dsp_cfg, audio_cons, pitch_tx, file_sr);
+                    pipe.run();
+                })?;
+
+            let inf_cfg = config.inference.clone();
+            std::thread::Builder::new()
+                .name("inference".into())
+                .spawn(move || {
+                    let mut eng = InferenceEngine::new(inf_cfg, pitch_rx, event_tx);
+                    eng.run();
+                })?;
+
+            std::thread::Builder::new()
+                .name("midi-router".into())
+                .spawn(move || {
+                    let router = MidiRouter::new(event_rx, render_tx);
+                    router.run();
+                })?;
+        }
+
+        InputMode::LiveCapture => {
+            info!("Using live audio capture");
+            clock = Arc::new(AudioClock::new(config.audio.sample_rate));
+
+            let (audio_prod, audio_cons) = rtrb::RingBuffer::new(config.audio.ring_capacity);
+            let (pitch_tx, pitch_rx) = crossbeam_channel::bounded::<PitchFrame>(64);
+            let (event_tx, event_rx) = crossbeam_channel::bounded::<NoteEvent>(256);
+
+            drop(playback_cons);
+            drop(playback_prod);
+
+            let cap = AudioCapture::start(&config.audio, clock.clone(), audio_prod)?;
+            keepalive.push(Box::new(cap));
+
+            let dsp_cfg = config.dsp.clone();
+            let sr = config.audio.sample_rate;
+            std::thread::Builder::new()
+                .name("dsp".into())
+                .spawn(move || {
+                    let mut pipe = DspPipeline::new(dsp_cfg, audio_cons, pitch_tx, sr);
+                    pipe.run();
+                })?;
+
+            let inf_cfg = config.inference.clone();
+            std::thread::Builder::new()
+                .name("inference".into())
+                .spawn(move || {
+                    let mut eng = InferenceEngine::new(inf_cfg, pitch_rx, event_tx);
+                    eng.run();
+                })?;
+
+            std::thread::Builder::new()
+                .name("midi-router".into())
+                .spawn(move || {
+                    let router = MidiRouter::new(event_rx, render_tx);
+                    router.run();
+                })?;
+        }
+    }
+
+    Ok(render::BackendHandles {
+        event_rx: render_rx,
+        clock,
+        transport_tx,
+        transport_state,
+        _keepalive: keepalive,
+    })
 }

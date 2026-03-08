@@ -84,10 +84,10 @@ impl InferenceEngine {
         let onset_confirm: u8 = 2;
         // Offset parameters
         let release_ratio: f32 = 2.0 + self.config.frame_threshold * 2.0;
-        let release_frames: u32 = 8;
+        let release_frames: u32 = 4;
         let peak_decay_ratio: f32 = 5.0;
         // Cooldown after NoteOff before the same pitch can retrigger
-        let retrigger_cooldown: u32 = 6;
+        let retrigger_cooldown: u32 = 3;
 
         let mut frame_num: u64 = 0;
         let mut warmup_done = false;
@@ -99,9 +99,9 @@ impl InferenceEngine {
 
             // ---- 1. Harmonic aliasing suppression ----
             // Suppress pitches that are harmonics of stronger pitches.
-            // Ratio threshold 0.50: keep only if energy ≥ 50% of the fundamental.
+            // Ratio threshold 0.35: keep only if energy ≥ 35% of the fundamental.
             let mut filtered = pitch_energy;
-            dsp::suppress_harmonic_aliasing(&mut filtered, 0.50);
+            dsp::suppress_harmonic_aliasing(&mut filtered, 0.35);
 
             // ---- 2. Local-max filter ±2 semitones ----
             // After aliasing suppression, remove pitches that aren't local peaks.
@@ -238,6 +238,35 @@ impl InferenceEngine {
                 } else {
                     // ---- Active note: track peak & detect offset ----
                     active_frames[i] += 1;
+
+                    // ---- Retrigger detection: sharp flux on active note ----
+                    // If energy suddenly spikes well above the current peak,
+                    // the same key was re-struck. End current note, start new.
+                    let retrigger_flux: f32 = 2.5;
+                    if active_frames[i] > 4 && flux > retrigger_flux && e > onset_thresh {
+                        // End current note
+                        let _ = self.event_tx.send(NoteEvent {
+                            kind: NoteEventKind::NoteOff,
+                            pitch,
+                            velocity: 0,
+                            sample_time,
+                        });
+                        // Immediately start new note
+                        peak_energy[i] = e;
+                        below_count[i] = 0;
+                        active_frames[i] = 0;
+                        let ratio = e / onset_thresh;
+                        let vel = ((ratio.sqrt() * 20.0 + 40.0).clamp(40.0, 127.0)) as u8;
+                        let _ = self.event_tx.send(NoteEvent {
+                            kind: NoteEventKind::NoteOn,
+                            pitch,
+                            velocity: vel,
+                            sample_time,
+                        });
+                        events_sent += 1;
+                        prev_energy[i] = e;
+                        continue;
+                    }
 
                     if e > peak_energy[i] {
                         peak_energy[i] = e;
