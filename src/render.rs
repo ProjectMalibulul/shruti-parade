@@ -1,4 +1,6 @@
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Instant;
 
 use crossbeam_channel::{Receiver, Sender};
@@ -46,6 +48,10 @@ const PLAYBAR_HANDLE_WIDTH: f32 = 0.02;
 const PLAY_BUTTON_SIZE: f32 = 0.07;
 const PLAY_BUTTON_X: f32 = -0.85;
 const PLAYBAR_SEEK_SECONDS: f64 = 5.0;
+
+const FILE_BUTTON_X: f32 = 0.85;
+const FILE_BUTTON_Y: f32 = PLAYBAR_Y;
+const FILE_BUTTON_SIZE: f32 = 0.07;
 
 // ---------------------------------------------------------------------------
 // Vertex type and quad geometry
@@ -122,6 +128,7 @@ pub fn run_render(
     clock: Arc<AudioClock>,
     transport_tx: Sender<TransportCommand>,
     transport_state: Arc<TransportState>,
+    pending_file: Arc<Mutex<Option<PathBuf>>>,
 ) -> anyhow::Result<()> {
     let event_loop = EventLoop::new()?;
     let mut app = App {
@@ -142,6 +149,8 @@ pub fn run_render(
         fps_accum: 0.0,
         fps_frame_count: 0,
         current_fps: 60.0,
+        hovered_file: false,
+        pending_file,
     };
     event_loop.run_app(&mut app)?;
     Ok(())
@@ -170,6 +179,9 @@ struct App {
     fps_accum: f32,
     fps_frame_count: u32,
     current_fps: f32,
+    // File drag-and-drop
+    hovered_file: bool,
+    pending_file: Arc<Mutex<Option<PathBuf>>>,
 }
 
 /// All GPU resources: surface, device, pipelines, buffers, bloom textures.
@@ -967,7 +979,24 @@ impl ApplicationHandler for App {
                     self.handle_key_input(event.logical_key);
                 }
             }
+            WindowEvent::DroppedFile(path) => {
+                self.hovered_file = false;
+                tracing::info!("File dropped: {}", path.display());
+                *self.pending_file.lock().unwrap() = Some(path);
+                event_loop.exit();
+            }
+            WindowEvent::HoveredFile(_) => {
+                self.hovered_file = true;
+            }
+            WindowEvent::HoveredFileCancelled => {
+                self.hovered_file = false;
+            }
             WindowEvent::RedrawRequested => {
+                // Check if rfd picker thread delivered a file
+                if self.pending_file.lock().unwrap().is_some() {
+                    event_loop.exit();
+                    return;
+                }
                 let now = Instant::now();
                 let dt = now.duration_since(self.last_frame).as_secs_f32();
                 self.last_frame = now;
@@ -1029,12 +1058,22 @@ impl App {
     }
 
     fn handle_playbar_press(&mut self, ndc: [f32; 2]) {
-        if !self.can_seek() {
-            return;
-        }
         let layout = self.playbar_layout();
+        // Play/pause button always works (even before total_samples is known)
         if layout.button.contains(ndc) {
             self.toggle_pause();
+            return;
+        }
+        // File open button
+        let file_btn = Rect {
+            center: [FILE_BUTTON_X, FILE_BUTTON_Y],
+            size: [FILE_BUTTON_SIZE, FILE_BUTTON_SIZE],
+        };
+        if file_btn.contains(ndc) {
+            self.open_file_picker();
+            return;
+        }
+        if !self.can_seek() {
             return;
         }
         if layout.bar.contains(ndc) {
@@ -1082,9 +1121,6 @@ impl App {
     }
 
     fn set_paused(&mut self, paused: bool) {
-        if !self.can_seek() {
-            return;
-        }
         self.transport_state.set_paused(paused);
         let cmd = if paused {
             TransportCommand::Pause
@@ -1099,12 +1135,29 @@ impl App {
         self.set_paused(paused);
     }
 
+    fn open_file_picker(&self) {
+        let pending = self.pending_file.clone();
+        std::thread::Builder::new()
+            .name("file-picker".into())
+            .spawn(move || {
+                let file = rfd::FileDialog::new()
+                    .add_filter(
+                        "Audio / MIDI",
+                        &["mid", "midi", "wav", "mp3", "flac", "ogg"],
+                    )
+                    .pick_file();
+                if let Some(path) = file {
+                    tracing::info!("File picked: {}", path.display());
+                    *pending.lock().unwrap() = Some(path);
+                }
+            })
+            .ok();
+    }
+
     fn handle_key_input(&mut self, key: Key) {
-        if !self.can_seek() {
-            return;
-        }
         match key {
             Key::Named(NamedKey::Space) => self.toggle_pause(),
+            _ if !self.can_seek() => {}
             Key::Named(NamedKey::ArrowLeft) => self.seek_by_seconds(-PLAYBAR_SEEK_SECONDS),
             Key::Named(NamedKey::ArrowRight) => self.seek_by_seconds(PLAYBAR_SEEK_SECONDS),
             Key::Named(NamedKey::Home) => self.seek_to_samples(0),
@@ -1417,42 +1470,41 @@ impl App {
             _pad: [0.0; 3],
         });
 
-        if can_seek {
-            if is_paused {
-                // Play triangle — rendered as a right-pointing arrow using
-                // a wide rectangle (approximation via rounded rect)
-                let tri_w = layout.button.size[0] * 0.30;
-                let tri_h = layout.button.size[1] * 0.50;
-                ui_instances.push(KeyInstance {
-                    position: [
-                        layout.button.center[0] + tri_w * 0.08,
-                        layout.button.center[1],
-                    ],
-                    size: [tri_w, tri_h],
-                    color: [0.85, 0.92, 1.0, 0.95],
-                    border_radius: 0.25,
-                    _pad: [0.0; 3],
-                });
-            } else {
-                // Pause bars
-                let offset = layout.button.size[0] * 0.16;
-                let bar_w = layout.button.size[0] * 0.14;
-                let bar_h = layout.button.size[1] * 0.50;
-                ui_instances.push(KeyInstance {
-                    position: [layout.button.center[0] - offset, layout.button.center[1]],
-                    size: [bar_w, bar_h],
-                    color: [0.85, 0.92, 1.0, 0.95],
-                    border_radius: 0.15,
-                    _pad: [0.0; 3],
-                });
-                ui_instances.push(KeyInstance {
-                    position: [layout.button.center[0] + offset, layout.button.center[1]],
-                    size: [bar_w, bar_h],
-                    color: [0.85, 0.92, 1.0, 0.95],
-                    border_radius: 0.15,
-                    _pad: [0.0; 3],
-                });
-            }
+        // Always show play/pause icon, even before total_samples is known
+        if is_paused {
+            // Play triangle — rendered as a right-pointing arrow using
+            // a wide rectangle (approximation via rounded rect)
+            let tri_w = layout.button.size[0] * 0.30;
+            let tri_h = layout.button.size[1] * 0.50;
+            ui_instances.push(KeyInstance {
+                position: [
+                    layout.button.center[0] + tri_w * 0.08,
+                    layout.button.center[1],
+                ],
+                size: [tri_w, tri_h],
+                color: [0.85, 0.92, 1.0, 0.95],
+                border_radius: 0.25,
+                _pad: [0.0; 3],
+            });
+        } else {
+            // Pause bars
+            let offset = layout.button.size[0] * 0.16;
+            let bar_w = layout.button.size[0] * 0.14;
+            let bar_h = layout.button.size[1] * 0.50;
+            ui_instances.push(KeyInstance {
+                position: [layout.button.center[0] - offset, layout.button.center[1]],
+                size: [bar_w, bar_h],
+                color: [0.85, 0.92, 1.0, 0.95],
+                border_radius: 0.15,
+                _pad: [0.0; 3],
+            });
+            ui_instances.push(KeyInstance {
+                position: [layout.button.center[0] + offset, layout.button.center[1]],
+                size: [bar_w, bar_h],
+                color: [0.85, 0.92, 1.0, 0.95],
+                border_radius: 0.15,
+                _pad: [0.0; 3],
+            });
         }
 
         // ---- FPS counter bar (top-right corner) ----
@@ -1486,6 +1538,82 @@ impl App {
                 size: [bar_w, bar_h * 0.7],
                 color: [fr, fg, fb, 0.85],
                 border_radius: 0.2,
+                _pad: [0.0; 3],
+            });
+        }
+
+        // ---- File open button ----
+        ui_instances.push(KeyInstance {
+            position: [FILE_BUTTON_X, FILE_BUTTON_Y],
+            size: [FILE_BUTTON_SIZE, FILE_BUTTON_SIZE],
+            color: [0.15, 0.16, 0.20, 0.9],
+            border_radius: 0.35,
+            _pad: [0.0; 3],
+        });
+        // "F" letter — approximated as a vertical bar + two horizontal bars
+        {
+            let cx = FILE_BUTTON_X;
+            let cy = FILE_BUTTON_Y;
+            let s = FILE_BUTTON_SIZE;
+            // Vertical bar (left side of F)
+            ui_instances.push(KeyInstance {
+                position: [cx - s * 0.10, cy],
+                size: [s * 0.10, s * 0.50],
+                color: [0.85, 0.92, 1.0, 0.95],
+                border_radius: 0.1,
+                _pad: [0.0; 3],
+            });
+            // Top horizontal bar
+            ui_instances.push(KeyInstance {
+                position: [cx + s * 0.05, cy + s * 0.20],
+                size: [s * 0.30, s * 0.08],
+                color: [0.85, 0.92, 1.0, 0.95],
+                border_radius: 0.1,
+                _pad: [0.0; 3],
+            });
+            // Middle horizontal bar
+            ui_instances.push(KeyInstance {
+                position: [cx + s * 0.01, cy],
+                size: [s * 0.22, s * 0.08],
+                color: [0.85, 0.92, 1.0, 0.95],
+                border_radius: 0.1,
+                _pad: [0.0; 3],
+            });
+        }
+
+        // ---- Drag-and-drop cyan border ----
+        if self.hovered_file {
+            let bw = 0.01; // border width in NDC
+                           // Top
+            ui_instances.push(KeyInstance {
+                position: [0.0, 1.0 - bw * 0.5],
+                size: [2.0, bw],
+                color: [0.0, 0.85, 1.0, 0.9],
+                border_radius: 0.0,
+                _pad: [0.0; 3],
+            });
+            // Bottom
+            ui_instances.push(KeyInstance {
+                position: [0.0, -1.0 + bw * 0.5],
+                size: [2.0, bw],
+                color: [0.0, 0.85, 1.0, 0.9],
+                border_radius: 0.0,
+                _pad: [0.0; 3],
+            });
+            // Left
+            ui_instances.push(KeyInstance {
+                position: [-1.0 + bw * 0.5, 0.0],
+                size: [bw, 2.0],
+                color: [0.0, 0.85, 1.0, 0.9],
+                border_radius: 0.0,
+                _pad: [0.0; 3],
+            });
+            // Right
+            ui_instances.push(KeyInstance {
+                position: [1.0 - bw * 0.5, 0.0],
+                size: [bw, 2.0],
+                color: [0.0, 0.85, 1.0, 0.9],
+                border_radius: 0.0,
                 _pad: [0.0; 3],
             });
         }

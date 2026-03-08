@@ -64,6 +64,8 @@ jobs:
             label: Ubuntu 24.04
           - os: macos-15
             label: macOS 15 (Sequoia, ARM64)
+          - os: windows-latest
+            label: Windows (latest)
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4

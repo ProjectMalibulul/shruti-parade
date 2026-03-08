@@ -14,8 +14,10 @@ pub struct AudioCapture {
 }
 
 /// Owns the `cpal` output stream for WAV playback. Dropping this stops playback.
+/// Falls back to a drain thread when no audio device is available (e.g. CI).
 pub struct AudioPlayback {
-    _stream: Stream,
+    _stream: Option<Stream>,
+    _drain: Option<std::thread::JoinHandle<()>>,
 }
 
 impl AudioPlayback {
@@ -31,14 +33,33 @@ impl AudioPlayback {
         mut consumer: rtrb::Consumer<f32>,
     ) -> Result<Self> {
         let host = cpal::default_host();
-        let device = host
-            .default_output_device()
-            .context("No audio output device found")?;
+        let device = match host.default_output_device() {
+            Some(d) => d,
+            None => {
+                info!("No audio output device — running headless (no playback)");
+                let drain = std::thread::Builder::new()
+                    .name("audio-drain".into())
+                    .spawn(move || {
+                        // Drain ring so producers never block
+                        loop {
+                            match consumer.pop() {
+                                Ok(_) => {}
+                                Err(_) => std::thread::sleep(std::time::Duration::from_millis(1)),
+                            }
+                        }
+                    })
+                    .ok();
+                return Ok(Self {
+                    _stream: None,
+                    _drain: drain,
+                });
+            }
+        };
 
         info!("Audio output device: {}", device.name().unwrap_or_default());
 
         let stream_config = StreamConfig {
-            channels: 1,
+            channels: 2, // stereo — mono samples are duplicated to L+R in the callback
             sample_rate: cpal::SampleRate(sample_rate),
             buffer_size: cpal::BufferSize::Default,
         };
@@ -49,15 +70,21 @@ impl AudioPlayback {
         let stream = device.build_output_stream(
             &stream_config,
             move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                for sample in data.iter_mut() {
+                // Iterate one stereo frame (2 samples) at a time, popping one
+                // mono sample from the ring per frame and duplicating to L+R.
+                for frame in data.chunks_mut(2) {
                     match consumer.pop() {
                         Ok(s) => {
                             last_sample = s;
-                            *sample = s;
+                            for ch in frame.iter_mut() {
+                                *ch = s;
+                            }
                         }
                         Err(_) => {
                             // Sample-hold fallback: avoids click from abrupt drop to 0
-                            *sample = last_sample;
+                            for ch in frame.iter_mut() {
+                                *ch = last_sample;
+                            }
                             underrun_count += 1;
                             if underrun_count & (underrun_count - 1) == 0 {
                                 eprintln!("[audio] ring underrun (×{underrun_count})");
@@ -76,7 +103,10 @@ impl AudioPlayback {
             sample_rate, buffer_frames
         );
 
-        Ok(Self { _stream: stream })
+        Ok(Self {
+            _stream: Some(stream),
+            _drain: None,
+        })
     }
 }
 

@@ -57,6 +57,10 @@ jobs:
             label: macos-15-arm64
             binary: shruti-parade
             archive: shruti-parade-macos-15-arm64.tar.gz
+          - os: windows-latest
+            label: windows-x86_64
+            binary: shruti-parade.exe
+            archive: shruti-parade-windows-x86_64.zip
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -85,7 +89,8 @@ jobs:
       - name: Build release binary
         run: cargo build --release
 
-      - name: Package archive
+      - name: Package archive (Unix)
+        if: runner.os != 'Windows'
         run: |
           cp target/release/${{ matrix.binary }} ${{ matrix.binary }}
           tar -czf ${{ matrix.archive }} \
@@ -93,12 +98,45 @@ jobs:
             README.md \
             LICENSE
 
+      - name: Package archive (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Copy-Item "target/release/${{ matrix.binary }}" "${{ matrix.binary }}"
+          Compress-Archive -Path "${{ matrix.binary }}", "README.md", "LICENSE" -DestinationPath "${{ matrix.archive }}"
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.label }}
           path: ${{ matrix.archive }}
           retention-days: 7
+
+  android-check:
+    name: Android compile check
+    needs: check-ci
+    if: needs.check-ci.outputs.should-run == 'true'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: android-check
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk
+
+      - name: Check (Android aarch64)
+        run: cargo ndk -t arm64-v8a check
 
   publish:
     name: Publish GitHub Release
@@ -157,6 +195,9 @@ jobs:
             | Ubuntu 22.04 (x86_64) | `shruti-parade-linux-ubuntu-22.04.tar.gz` |
             | Ubuntu 24.04 (x86_64) | `shruti-parade-linux-ubuntu-24.04.tar.gz` |
             | macOS 15 Sequoia (ARM64) | `shruti-parade-macos-15-arm64.tar.gz` |
-          files: release-artifacts/**/*.tar.gz
+            | Windows (x86_64) | `shruti-parade-windows-x86_64.zip` |
+          files: |
+            release-artifacts/**/*.tar.gz
+            release-artifacts/**/*.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
