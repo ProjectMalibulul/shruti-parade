@@ -47,6 +47,28 @@ const PLAY_BUTTON_X: f32 = -0.85;
 const PLAYBAR_SEEK_SECONDS: f64 = 5.0;
 
 // ---------------------------------------------------------------------------
+// Vertex type and quad geometry
+// ---------------------------------------------------------------------------
+
+/// Per-vertex data for the unit quad (position only, maps to @location(0) in WGSL).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct Vertex {
+    position: [f32; 2],
+}
+
+/// Unit quad as two triangles (TriangleList). Covers [-1,1] in both axes.
+/// Instanced pipelines scale and translate this per-instance.
+const QUAD_VERTS: [Vertex; 6] = [
+    Vertex { position: [-1.0, -1.0] },
+    Vertex { position: [ 1.0, -1.0] },
+    Vertex { position: [ 1.0,  1.0] },
+    Vertex { position: [-1.0, -1.0] },
+    Vertex { position: [ 1.0,  1.0] },
+    Vertex { position: [-1.0,  1.0] },
+];
+
+// ---------------------------------------------------------------------------
 // Playbar layout
 // ---------------------------------------------------------------------------
 
@@ -102,6 +124,8 @@ pub fn run_render(
         last_frame: Instant::now(),
         playbar_dragging: false,
         cursor_ndc: None,
+        pedal_brightness: 0.0,
+        pedal_held: false,
     };
     event_loop.run_app(&mut app)?;
     Ok(())
@@ -124,6 +148,8 @@ struct App {
     last_frame: Instant,
     playbar_dragging: bool,
     cursor_ndc: Option<[f32; 2]>,
+    pedal_brightness: f32,
+    pedal_held: bool,
 }
 
 /// All GPU resources: surface, device, pipelines, buffers, bloom textures.
@@ -968,6 +994,8 @@ impl App {
     fn clear_visuals(&mut self) {
         self.visual_notes.clear();
         self.particles.clear();
+        self.pedal_brightness = 0.0;
+        self.pedal_held = false;
     }
 
     fn handle_playbar_press(&mut self, ndc: [f32; 2]) {
@@ -1094,7 +1122,21 @@ impl App {
                         n.end_time = Some(t);
                     }
                 }
+                NoteEventKind::PedalOn => {
+                    self.pedal_brightness = 1.0;
+                    self.pedal_held = true;
+                }
+                NoteEventKind::PedalOff => {
+                    self.pedal_held = false;
+                }
             }
+        }
+
+        // Fade pedal brightness when released (same pattern as particle fade)
+        if self.pedal_held {
+            self.pedal_brightness = 1.0;
+        } else if self.pedal_brightness > 0.0 {
+            self.pedal_brightness = (self.pedal_brightness - dt * 2.5).max(0.0);
         }
 
         // Advance particles
@@ -1136,15 +1178,13 @@ impl App {
         }
 
         // ---- update key instances with highlighting ----
+        let key_draw_count;
         {
             let mut keys = gpu.key_instances.clone();
-            // White keys are indices 0..52, black keys 52..88.
-            // We iterate all MIDI pitches and update matching keys.
             let mut white_idx: usize = 0;
             let mut black_idx: usize = 0;
             for midi in PIANO_MIN..=PIANO_MAX {
                 if is_black_key(midi) {
-                    // Black key at index 52 + black_idx
                     let ki = 52 + black_idx;
                     if ki < keys.len() && active_pitches[midi as usize] {
                         let hue = pitch_to_hue(midi);
@@ -1155,7 +1195,6 @@ impl App {
                     }
                     black_idx += 1;
                 } else {
-                    // White key at index white_idx
                     if white_idx < keys.len() && active_pitches[midi as usize] {
                         let hue = pitch_to_hue(midi);
                         let (r, g, b) = hsv_to_rgb(hue, 0.7, 1.0);
@@ -1166,6 +1205,22 @@ impl App {
                     white_idx += 1;
                 }
             }
+
+            // Pedal indicator bar — thin bar below the piano keys.
+            // Rendered through the same key pipeline (with bloom).
+            // Fades out smoothly when pedal is released.
+            if self.pedal_brightness > 0.001 {
+                let b = self.pedal_brightness;
+                keys.push(KeyInstance {
+                    position: [0.0, -0.995],
+                    size: [1.90, 0.015],
+                    color: [0.35 * b, 0.70 * b, 1.0 * b, b.clamp(0.0, 1.0)],
+                    border_radius: 0.3,
+                    _pad: [0.0; 3],
+                });
+            }
+
+            key_draw_count = keys.len();
             gpu.queue
                 .write_buffer(&gpu.key_instance_buffer, 0, bytemuck::cast_slice(&keys));
         }
@@ -1367,7 +1422,7 @@ impl App {
             pass.set_bind_group(0, &gpu.uniform_bind_group, &[]);
             pass.set_vertex_buffer(0, gpu.vertex_buffer.slice(..));
             pass.set_vertex_buffer(1, gpu.key_instance_buffer.slice(..));
-            pass.draw(0..6, 0..gpu.key_instances.len() as u32);
+            pass.draw(0..6, 0..key_draw_count as u32);
 
             // Draw falling notes
             if note_count > 0 {

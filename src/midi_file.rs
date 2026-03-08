@@ -240,6 +240,18 @@ pub fn stream_midi_file(
                     midly::MidiMessage::NoteOff { key, .. } => {
                         (NoteEventKind::NoteOff, key.as_int(), 0u8)
                     }
+                    midly::MidiMessage::Controller { controller, value } => {
+                        // CC64 = sustain pedal
+                        if controller.as_int() == 64 {
+                            if value.as_int() >= 64 {
+                                (NoteEventKind::PedalOn, 0, 0)
+                            } else {
+                                (NoteEventKind::PedalOff, 0, 0)
+                            }
+                        } else {
+                            continue;
+                        }
+                    }
                     _ => continue,
                 },
                 _ => continue,
@@ -344,6 +356,7 @@ pub fn stream_midi_file(
             match te.event.kind {
                 NoteEventKind::NoteOn => synth.note_on(te.event.pitch, te.event.velocity),
                 NoteEventKind::NoteOff => synth.note_off(te.event.pitch),
+                NoteEventKind::PedalOn | NoteEventKind::PedalOff => {} // visual only
             }
             event_idx += 1;
         }

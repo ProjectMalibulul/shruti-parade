@@ -255,3 +255,78 @@ impl InferenceEngine {
         debug!("Inference engine stopped (channel closed)");
     }
 }
+
+#[cfg(test)]
+mod inference_tests {
+    use super::*;
+    use crate::config::InferenceConfig;
+    use crate::dsp::PitchFrame;
+
+    fn default_inference_config() -> InferenceConfig {
+        InferenceConfig {
+            model_path: String::new(),
+            context_frames: 32,
+            overlap_frames: 8,
+            onset_threshold: 0.5,
+            frame_threshold: 0.3,
+        }
+    }
+
+    #[test]
+    fn offset_after_silence() {
+        let (pitch_tx, pitch_rx) = crossbeam_channel::unbounded();
+        let (event_tx, event_rx) = crossbeam_channel::unbounded();
+        let config = default_inference_config();
+
+        let handle = std::thread::spawn(move || {
+            let mut engine = InferenceEngine::new(config, pitch_rx, event_tx);
+            engine.run();
+        });
+
+        let target_pitch: u8 = 60; // C4
+
+        // Send 30 warmup frames (silent) to calibrate noise floor
+        for i in 0..30 {
+            let frame = PitchFrame {
+                pitch_energy: [0.0; 128],
+                sample_offset: i * 512,
+            };
+            pitch_tx.send(frame).unwrap();
+        }
+
+        // Send frames with high energy for note 60 (onset)
+        for i in 30..50 {
+            let mut energy = [0.0f32; 128];
+            energy[target_pitch as usize] = 500.0;
+            let frame = PitchFrame {
+                pitch_energy: energy,
+                sample_offset: i * 512,
+            };
+            pitch_tx.send(frame).unwrap();
+        }
+
+        // Send zero-energy frames (should trigger offset)
+        for i in 50..80 {
+            let frame = PitchFrame {
+                pitch_energy: [0.0; 128],
+                sample_offset: i * 512,
+            };
+            pitch_tx.send(frame).unwrap();
+        }
+
+        // Close channel to stop engine
+        drop(pitch_tx);
+        handle.join().unwrap();
+
+        // Collect all events
+        let events: Vec<NoteEvent> = event_rx.try_iter().collect();
+
+        let has_note_off = events.iter().any(|e| {
+            e.kind == NoteEventKind::NoteOff && e.pitch == target_pitch
+        });
+        assert!(
+            has_note_off,
+            "Expected NoteOff for pitch {target_pitch}, got events: {events:?}"
+        );
+    }
+}

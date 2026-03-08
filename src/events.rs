@@ -3,6 +3,8 @@
 pub enum NoteEventKind {
     NoteOn,
     NoteOff,
+    PedalOn,
+    PedalOff,
 }
 
 /// A timestamped note event produced by the inference engine.
