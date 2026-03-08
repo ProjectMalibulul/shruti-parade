@@ -1,5 +1,5 @@
 use crossbeam_channel::{Receiver, Sender};
-use tracing::{debug, info};
+use tracing::info;
 
 use crate::events::NoteEvent;
 
@@ -23,15 +23,20 @@ impl MidiRouter {
     /// Blocking router loop — call from a dedicated thread.
     pub fn run(&self) {
         info!("MIDI router started");
+        let mut routed: u64 = 0;
 
         for event in self.event_rx.iter() {
             // Fan-out to render (drop if back-pressured — visual is non-critical).
             let _ = self.render_tx.try_send(event);
+            routed += 1;
+            if routed == 1 {
+                info!("MIDI router: first event forwarded to renderer");
+            }
 
             // TODO: forward to midir output port
             // TODO: append to SMF recorder
         }
 
-        debug!("MIDI router stopped (channel closed)");
+        info!("MIDI router stopped — {routed} events routed");
     }
 }

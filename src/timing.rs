@@ -33,7 +33,6 @@ impl AudioClock {
 
     /// Raw sample count.
     #[inline]
-    #[allow(dead_code)]
     pub fn now_samples(&self) -> u64 {
         self.sample_count.load(Ordering::Acquire)
     }
@@ -51,7 +50,6 @@ impl AudioClock {
         sample as f64 / self.sample_rate
     }
 
-    #[allow(dead_code)]
     pub fn sample_rate(&self) -> f64 {
         self.sample_rate
     }

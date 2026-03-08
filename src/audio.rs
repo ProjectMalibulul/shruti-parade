@@ -59,32 +59,32 @@ impl AudioPlayback {
         info!("Audio output device: {}", device.name().unwrap_or_default());
 
         let stream_config = StreamConfig {
-            channels: 2, // stereo — mono samples are duplicated to L+R in the callback
+            channels: 2, // stereo — ring carries interleaved L+R pairs
             sample_rate: cpal::SampleRate(sample_rate),
             buffer_size: cpal::BufferSize::Default,
         };
 
-        let mut last_sample = 0.0f32;
+        let mut last_l = 0.0f32;
+        let mut last_r = 0.0f32;
         let mut underrun_count = 0u64;
 
         let stream = device.build_output_stream(
             &stream_config,
             move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                // Iterate one stereo frame (2 samples) at a time, popping one
-                // mono sample from the ring per frame and duplicating to L+R.
+                // Pop two samples per stereo frame: one L, one R.
+                // The feed thread always pushes interleaved stereo pairs.
                 for frame in data.chunks_mut(2) {
-                    match consumer.pop() {
-                        Ok(s) => {
-                            last_sample = s;
-                            for ch in frame.iter_mut() {
-                                *ch = s;
-                            }
+                    match (consumer.pop(), consumer.pop()) {
+                        (Ok(l), Ok(r)) => {
+                            last_l = l;
+                            last_r = r;
+                            frame[0] = l;
+                            frame[1] = r;
                         }
-                        Err(_) => {
+                        _ => {
                             // Sample-hold fallback: avoids click from abrupt drop to 0
-                            for ch in frame.iter_mut() {
-                                *ch = last_sample;
-                            }
+                            frame[0] = last_l;
+                            frame[1] = last_r;
                             underrun_count += 1;
                             if underrun_count & (underrun_count - 1) == 0 {
                                 eprintln!("[audio] ring underrun (×{underrun_count})");

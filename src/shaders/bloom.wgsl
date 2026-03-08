@@ -102,13 +102,27 @@ fn fs_bloom_composite(in: FullscreenOutput) -> @location(0) vec4<f32> {
 }
 
 // --- Hit-line overlay ---
+// Improved hit-line with subtle rainbow shimmer and wider glow
 @fragment
 fn fs_hitline(in: FullscreenOutput) -> @location(0) vec4<f32> {
     let line_y = 0.9;
     let dist = abs(in.uv.y - line_y);
-    let pulse = 1.0 + 0.15 * sin(frame.time * 2.5);
+    let pulse = 1.0 + 0.12 * sin(frame.time * 2.5);
+
+    // Core line (sharp)
     let core = smoothstep(0.003, 0.0, dist) * pulse;
-    let glow = exp(-dist * dist / 0.0006) * 0.5 * pulse;
-    let intensity = core + glow;
-    return vec4<f32>(0.55, 0.80, 1.0, intensity);
+    // Inner glow (medium)
+    let glow_inner = exp(-dist * dist / 0.0004) * 0.45 * pulse;
+    // Outer glow (wide, subtle)
+    let glow_outer = exp(-dist * dist / 0.003) * 0.12;
+
+    let intensity = core + glow_inner + glow_outer;
+
+    // Subtle horizontal hue shift — rainbow shimmer across the hit-line
+    let hue = in.uv.x * 0.8 + frame.time * 0.15;
+    let r = 0.50 + 0.10 * sin(hue * 6.28);
+    let g = 0.78 + 0.08 * sin(hue * 6.28 + 2.09);
+    let b = 1.0;
+
+    return vec4<f32>(r, g, b, intensity);
 }

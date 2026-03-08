@@ -730,11 +730,11 @@ mod render_util_tests {
     #[test]
     fn build_piano_keys_count() {
         let keys = build_piano_keys();
-        // 88 keys + 2 decorative elements (shadow bar + highlight strip)
+        // 2 decorative + 52 white + 36 black + 15 key-name dots (8 C + 7 F)
         assert_eq!(
             keys.len(),
-            90,
-            "Expected 90 piano key instances, got {}",
+            105,
+            "Expected 105 piano key instances, got {}",
             keys.len()
         );
     }
@@ -742,12 +742,12 @@ mod render_util_tests {
     #[test]
     fn white_keys_brighter_than_black() {
         let keys = build_piano_keys();
-        // First 2 are decorative (shadow + highlight), then 52 white, then 36 black
+        // First 2 decorative, then 52 white, then 36 black, then 15 dots
         for key in &keys[2..54] {
             let luminance = key.color[0] * 0.3 + key.color[1] * 0.59 + key.color[2] * 0.11;
             assert!(luminance > 0.5, "White key should be bright");
         }
-        for key in &keys[54..] {
+        for key in &keys[54..90] {
             let luminance = key.color[0] * 0.3 + key.color[1] * 0.59 + key.color[2] * 0.11;
             assert!(luminance < 0.3, "Black key should be dark");
         }

@@ -27,8 +27,8 @@ use crate::transport::{TransportCommand, TransportState};
 
 const MAX_NOTE_INSTANCES: usize = 4096;
 const MAX_PARTICLE_INSTANCES: usize = 2048;
-const MAX_UI_INSTANCES: usize = 128;
-const MAX_KEY_INSTANCES: usize = 256; // 88 keys + pedal + heat bar
+const MAX_UI_INSTANCES: usize = 256;
+const MAX_KEY_INSTANCES: usize = 384; // 88 keys + pedal + heat bar + key names
 
 const HIT_LINE_Y: f32 = -0.8; // NDC y where notes "land"
 const SCROLL_SPEED: f32 = 0.5; // NDC per second
@@ -236,13 +236,12 @@ pub fn is_black_key(midi: u8) -> bool {
 }
 
 pub fn build_piano_keys() -> Vec<KeyInstance> {
-    let mut keys = Vec::with_capacity(128);
+    let mut keys = Vec::with_capacity(256);
     let white_width = 2.0 / 52.0; // 52 white keys in 88-key range (approx)
     let key_height = 0.15;
     let key_y = -0.92;
 
     // Shadow / depth base: a dark bar spanning the entire keyboard area
-    // just below the piano keys to give a 3D inset appearance.
     keys.push(KeyInstance {
         position: [0.0, key_y - key_height * 0.48],
         size: [2.0, key_height * 0.12],
@@ -251,7 +250,7 @@ pub fn build_piano_keys() -> Vec<KeyInstance> {
         _pad: [0.0; 3],
     });
 
-    // Top-edge highlight: a subtle light strip above the keyboard
+    // Top-edge highlight
     keys.push(KeyInstance {
         position: [0.0, key_y + key_height * 0.52],
         size: [2.0, 0.003],
@@ -277,7 +276,7 @@ pub fn build_piano_keys() -> Vec<KeyInstance> {
         white_idx += 1;
     }
 
-    // Second pass: black keys (positioned between white keys)
+    // Second pass: black keys
     white_idx = 0;
     let mut prev_white_x = -1.0 + 0.5 * white_width;
     for midi in PIANO_MIN..=PIANO_MAX {
@@ -294,6 +293,42 @@ pub fn build_piano_keys() -> Vec<KeyInstance> {
             prev_white_x = -1.0 + (white_idx as f32 + 0.5) * white_width;
             white_idx += 1;
         }
+    }
+
+    // Third pass: key name indicators — small colored dots below each C note
+    // and a dimmer dot under F notes for visual anchoring across the keyboard.
+    white_idx = 0;
+    for midi in PIANO_MIN..=PIANO_MAX {
+        if is_black_key(midi) {
+            continue;
+        }
+        let x = -1.0 + (white_idx as f32 + 0.5) * white_width;
+        let pc = midi % 12;
+        let dot_y = key_y - key_height * 0.55;
+        let dot_size = 0.006;
+
+        if pc == 0 {
+            // C notes: bright cyan dot + register visualization
+            let octave = midi / 12;
+            let brightness = 0.5 + (octave as f32 - 1.0) * 0.08;
+            keys.push(KeyInstance {
+                position: [x, dot_y],
+                size: [dot_size, dot_size],
+                color: [0.2, brightness, 1.0, 0.9],
+                border_radius: 0.5,
+                _pad: [0.0; 3],
+            });
+        } else if pc == 5 {
+            // F notes: dim reference dot
+            keys.push(KeyInstance {
+                position: [x, dot_y],
+                size: [dot_size * 0.6, dot_size * 0.6],
+                color: [0.3, 0.3, 0.35, 0.4],
+                border_radius: 0.5,
+                _pad: [0.0; 3],
+            });
+        }
+        white_idx += 1;
     }
 
     keys
@@ -1453,6 +1488,16 @@ impl App {
         let is_paused = self.transport_state.is_paused();
         let layout = self.playbar_layout();
 
+        // ── Top bar background (dark translucent strip) ──
+        ui_instances.push(KeyInstance {
+            position: [0.0, 0.93],
+            size: [2.0, 0.16],
+            color: [0.03, 0.03, 0.06, 0.70],
+            border_radius: 0.0,
+            _pad: [0.0; 3],
+        });
+
+        // ── Progress bar background ──
         let bar_color = if can_seek {
             [0.08, 0.09, 0.13, 0.85]
         } else {
@@ -1471,17 +1516,36 @@ impl App {
                 / (total_samples as f32).max(1.0);
             let bar_left = layout.bar.left() + PLAYBAR_PADDING;
             let bar_width = (layout.bar.size[0] - PLAYBAR_PADDING * 2.0).max(0.0);
-            let fill_w = (bar_width * progress).max(0.002);
-            let fill_x = bar_left + fill_w * 0.5;
 
-            ui_instances.push(KeyInstance {
-                position: [fill_x, layout.bar.center[1]],
-                size: [fill_w, layout.bar.size[1] * 0.55],
-                color: [0.35, 0.70, 1.0, 0.9],
-                border_radius: 0.35,
-                _pad: [0.0; 3],
-            });
+            // Gradient progress fill — 4 segments that shift hue across the bar
+            let fill_w_total = (bar_width * progress).max(0.002);
+            let n_segments: usize = 4;
+            let seg_w = fill_w_total / n_segments as f32;
+            for seg in 0..n_segments {
+                let t = seg as f32 / n_segments as f32;
+                let seg_left = bar_left + seg as f32 * seg_w;
+                let seg_right = seg_left + seg_w;
+                if seg_right <= bar_left {
+                    continue;
+                }
+                let seg_cx = (seg_left + seg_right) * 0.5;
+                // Gradient from cyan to blue-violet across the fill
+                let hue = 190.0 + t * 70.0;
+                let (gr, gg, gb) = hsv_to_rgb(hue, 0.8, 0.85);
+                ui_instances.push(KeyInstance {
+                    position: [seg_cx, layout.bar.center[1]],
+                    size: [seg_w, layout.bar.size[1] * 0.55],
+                    color: [gr, gg, gb, 0.9],
+                    border_radius: if seg == 0 || seg == n_segments - 1 {
+                        0.35
+                    } else {
+                        0.0
+                    },
+                    _pad: [0.0; 3],
+                });
+            }
 
+            // Playback handle (scrubber)
             let handle_x = bar_left + bar_width * progress;
             ui_instances.push(KeyInstance {
                 position: [handle_x, layout.bar.center[1]],
@@ -1492,10 +1556,18 @@ impl App {
             });
         }
 
+        // ── State-coloured play/pause button ──
+        let btn_color = if !can_seek {
+            [0.12, 0.12, 0.16, 0.5]
+        } else if is_paused {
+            [0.15, 0.35, 0.18, 0.9] // green tint (ready to play)
+        } else {
+            [0.40, 0.28, 0.10, 0.9] // amber tint (playing)
+        };
         ui_instances.push(KeyInstance {
             position: layout.button.center,
             size: layout.button.size,
-            color: [0.15, 0.16, 0.20, if can_seek { 0.9 } else { 0.5 }],
+            color: btn_color,
             border_radius: 0.35,
             _pad: [0.0; 3],
         });
@@ -1537,7 +1609,7 @@ impl App {
             });
         }
 
-        // ---- FPS counter bar (top-right corner) ----
+        // ---- FPS counter (top-right) ----
         {
             let fps_fraction = (self.current_fps / 120.0).clamp(0.0, 1.0);
             let bar_max_w = 0.12;
@@ -1545,7 +1617,6 @@ impl App {
             let bar_h = 0.015;
             let bar_x = 0.93 - (bar_max_w - bar_w) * 0.5;
             let bar_y = 0.97;
-            // Smooth gradient: red (0 FPS) → yellow (45 FPS) → green (60+ FPS)
             let t = (self.current_fps / 60.0).clamp(0.0, 1.0);
             let (fr, fg, fb) = if t < 0.5 {
                 let s = t * 2.0;
@@ -1570,6 +1641,66 @@ impl App {
                 border_radius: 0.2,
                 _pad: [0.0; 3],
             });
+            // FPS digit indicator: series of tiny dots representing tens digit
+            let fps_tens = (self.current_fps / 10.0).round() as u32;
+            let dot_count = fps_tens.min(12);
+            let dot_x_start = 0.93 - bar_max_w * 0.5;
+            let dot_gap = bar_max_w / 13.0;
+            for d in 0..dot_count {
+                ui_instances.push(KeyInstance {
+                    position: [dot_x_start + d as f32 * dot_gap, bar_y - 0.015],
+                    size: [0.004, 0.004],
+                    color: [fr, fg, fb, 0.7],
+                    border_radius: 0.5,
+                    _pad: [0.0; 3],
+                });
+            }
+        }
+
+        // ---- BPM estimate (top-right, below FPS) ----
+        // Estimate BPM from recent note onset intervals
+        {
+            let mut recent_onsets: Vec<f64> = self
+                .visual_notes
+                .iter()
+                .filter(|n| now - n.start_time < 8.0)
+                .map(|n| n.start_time)
+                .collect();
+            recent_onsets.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            recent_onsets.dedup();
+
+            if recent_onsets.len() >= 3 {
+                let mut intervals: Vec<f64> = recent_onsets
+                    .windows(2)
+                    .map(|w| w[1] - w[0])
+                    .filter(|&d| d > 0.1 && d < 2.0)
+                    .collect();
+                if !intervals.is_empty() {
+                    intervals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                    let median = intervals[intervals.len() / 2];
+                    let bpm = (60.0 / median).round() as u32;
+                    let bpm_clamped = bpm.clamp(30, 300);
+                    // Show BPM as a horizontal bar sized proportionally
+                    let bpm_frac = (bpm_clamped as f32 - 30.0) / 270.0;
+                    let bpm_bar_w = 0.08 * bpm_frac;
+                    // Background pill
+                    ui_instances.push(KeyInstance {
+                        position: [0.93, 0.935],
+                        size: [0.10, 0.015],
+                        color: [0.06, 0.06, 0.08, 0.50],
+                        border_radius: 0.3,
+                        _pad: [0.0; 3],
+                    });
+                    // BPM fill
+                    ui_instances.push(KeyInstance {
+                        position: [0.93 - (0.08 - bpm_bar_w) * 0.5, 0.935],
+                        size: [bpm_bar_w.max(0.005), 0.010],
+                        color: [0.9, 0.55, 0.2, 0.8],
+                        border_radius: 0.3,
+                        _pad: [0.0; 3],
+                    });
+                }
+            }
         }
 
         // ---- File open button ----
@@ -1612,7 +1743,6 @@ impl App {
         }
 
         // ---- Active note count indicator (top-left) ----
-        // Shows a segmented bar where each lit segment represents an active note.
         {
             let max_dots: u32 = 10;
             let dot_w = 0.012;
@@ -1650,31 +1780,91 @@ impl App {
             }
         }
 
+        // ---- Level meter (top-left, below polyphony dots) ----
+        // Approximates audio level from the max velocity of active notes.
+        {
+            let max_vel: f32 = self
+                .visual_notes
+                .iter()
+                .filter(|n| n.end_time.is_none())
+                .map(|n| n.velocity as f32 / 127.0)
+                .fold(0.0f32, f32::max);
+
+            let meter_x = -0.93;
+            let meter_y = 0.935;
+            let meter_w = 0.15;
+            let meter_h = 0.010;
+            let n_bars: usize = 8;
+            let bar_gap = meter_w / n_bars as f32;
+
+            // Background track
+            ui_instances.push(KeyInstance {
+                position: [meter_x + meter_w * 0.5, meter_y],
+                size: [meter_w + 0.01, meter_h * 1.4],
+                color: [0.05, 0.05, 0.07, 0.40],
+                border_radius: 0.2,
+                _pad: [0.0; 3],
+            });
+
+            for i in 0..n_bars {
+                let t = (i + 1) as f32 / n_bars as f32;
+                let lit = max_vel >= t - 0.5 / n_bars as f32;
+                let x = meter_x + i as f32 * bar_gap;
+                // Green → yellow → red gradient
+                let (mr, mg, mb) = if t < 0.5 {
+                    (0.2, 0.8, 0.3)
+                } else if t < 0.8 {
+                    (0.8, 0.7, 0.1)
+                } else {
+                    (0.9, 0.2, 0.15)
+                };
+                let alpha = if lit { 0.85 } else { 0.15 };
+                ui_instances.push(KeyInstance {
+                    position: [x, meter_y],
+                    size: [bar_gap * 0.7, meter_h * 0.7],
+                    color: [mr, mg, mb, alpha],
+                    border_radius: 0.15,
+                    _pad: [0.0; 3],
+                });
+            }
+        }
+
         // ---- Track info bar (top centre) ----
-        // Thin strip showing playback time when total is known.
         if can_seek {
-            let bar_w = 0.35;
-            let bar_h = 0.022;
+            let bar_w = 0.40;
+            let bar_h = 0.025;
             let bar_y = 0.97;
             // Background pill
             ui_instances.push(KeyInstance {
                 position: [0.0, bar_y],
                 size: [bar_w, bar_h],
-                color: [0.06, 0.07, 0.10, 0.60],
+                color: [0.05, 0.06, 0.09, 0.65],
                 border_radius: 0.4,
                 _pad: [0.0; 3],
             });
 
-            // Elapsed / total time — represented as a thin internal fill bar
+            // Elapsed / total represented as a gradient fill
             let progress = (self.clock.now_samples().min(total_samples) as f32)
                 / (total_samples as f32).max(1.0);
-            let fill_w = (bar_w - 0.02) * progress;
-            let fill_x = -(bar_w - 0.02) * 0.5 + fill_w * 0.5;
+            let inner_w = bar_w - 0.02;
+            let fill_w = inner_w * progress;
+            let fill_x = -(inner_w) * 0.5 + fill_w * 0.5;
+            // Fill gradient: dim at start, brighter at current position
             ui_instances.push(KeyInstance {
                 position: [fill_x, bar_y],
-                size: [fill_w.max(0.001), bar_h * 0.35],
-                color: [0.30, 0.55, 0.85, 0.55],
+                size: [fill_w.max(0.001), bar_h * 0.30],
+                color: [0.25, 0.50, 0.80, 0.50],
                 border_radius: 0.4,
+                _pad: [0.0; 3],
+            });
+
+            // Small bright dot at current position
+            let dot_x = -(inner_w) * 0.5 + inner_w * progress;
+            ui_instances.push(KeyInstance {
+                position: [dot_x, bar_y],
+                size: [0.006, bar_h * 0.5],
+                color: [0.7, 0.85, 1.0, 0.9],
+                border_radius: 0.5,
                 _pad: [0.0; 3],
             });
         }

@@ -90,6 +90,14 @@ fn main() -> Result<()> {
     info!("Shruti Parade — starting up");
 
     let config = EngineConfig::default();
+    info!(
+        "Config: {}Hz buf={} ring={} FFT={}/{} hop={} mel={}({:.0}-{:.0}Hz) model={} ctx={}/{} render={}×{} fall={:.0}",
+        config.audio.sample_rate, config.audio.buffer_frames, config.audio.ring_capacity,
+        config.dsp.fft_size, config.dsp.bass_fft_size, config.dsp.hop_size,
+        config.dsp.n_mels, config.dsp.mel_fmin, config.dsp.mel_fmax,
+        config.inference.model_path, config.inference.context_frames, config.inference.overlap_frames,
+        config.render.width, config.render.height, config.render.note_fall_speed,
+    );
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut mode = detect_mode(&args);
@@ -104,8 +112,8 @@ fn main() -> Result<()> {
         let transport_state = Arc::new(TransportState::new());
         let (transport_tx, transport_rx) = crossbeam_channel::bounded(64);
 
-        // ---- playback ring (4× capacity for jitter headroom) ----
-        let playback_capacity = config.audio.ring_capacity * 4;
+        // ---- playback ring (stereo interleaved: 2 samples/frame, 4× jitter headroom) ----
+        let playback_capacity = config.audio.ring_capacity * 4 * 2;
         let (playback_prod, playback_cons) = rtrb::RingBuffer::new(playback_capacity);
 
         // Keep handles alive so streams aren't dropped
@@ -134,8 +142,7 @@ fn main() -> Result<()> {
                 _audio_handle = None;
 
                 let clock_midi = clock.clone();
-                let sr = config.audio.sample_rate;
-                let chunk = config.audio.buffer_frames;
+                let audio_cfg = config.audio.clone();
                 let transport_state_thread = transport_state.clone();
                 let transport_rx_thread = transport_rx.clone();
                 std::thread::Builder::new()
@@ -146,8 +153,7 @@ fn main() -> Result<()> {
                             render_tx,
                             Some(playback_prod),
                             clock_midi,
-                            sr,
-                            chunk,
+                            &audio_cfg,
                             transport_rx_thread,
                             transport_state_thread,
                         ) {
@@ -177,8 +183,7 @@ fn main() -> Result<()> {
                 _audio_handle = None;
 
                 let clock_bp = clock.clone();
-                let sr = config.audio.sample_rate;
-                let chunk = config.audio.buffer_frames;
+                let audio_cfg = config.audio.clone();
                 let transport_state_thread = transport_state.clone();
                 let transport_rx_thread = transport_rx.clone();
                 std::thread::Builder::new()
@@ -189,8 +194,7 @@ fn main() -> Result<()> {
                             render_tx,
                             Some(playback_prod),
                             clock_bp,
-                            sr,
-                            chunk,
+                            &audio_cfg,
                             transport_rx_thread,
                             transport_state_thread,
                         ) {

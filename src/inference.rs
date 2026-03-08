@@ -51,6 +51,7 @@ impl InferenceEngine {
         let mut below_count = [0u32; N_PITCHES];
         let mut cooldown = [0u32; N_PITCHES];
         let mut active_count: usize = 0;
+        let mut events_sent: u64 = 0;
 
         // Sustain pedal simulation: detect when multiple notes overlap
         // (typical of pedaled passages) and extend their release window.
@@ -213,6 +214,13 @@ impl InferenceEngine {
                                         velocity: pending_vel[i],
                                         sample_time,
                                     });
+                                    events_sent += 1;
+                                    if events_sent == 1 {
+                                        info!(
+                                            "Inference: first NoteOn pitch={} vel={} at sample {}",
+                                            pitch, pending_vel[i], sample_time
+                                        );
+                                    }
                                 }
                             }
                         } else {

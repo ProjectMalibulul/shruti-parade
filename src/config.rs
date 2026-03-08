@@ -21,21 +21,15 @@ pub struct DspConfig {
     pub fft_size: usize,
     pub bass_fft_size: usize,
     pub hop_size: usize,
-    #[allow(dead_code)]
     pub n_mels: usize,
-    #[allow(dead_code)]
     pub mel_fmin: f32,
-    #[allow(dead_code)]
     pub mel_fmax: f32,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct InferenceConfig {
-    #[allow(dead_code)]
     pub model_path: String,
-    #[allow(dead_code)]
     pub context_frames: usize,
-    #[allow(dead_code)]
     pub overlap_frames: usize,
     pub onset_threshold: f32,
     pub frame_threshold: f32,
@@ -45,7 +39,6 @@ pub struct InferenceConfig {
 pub struct RenderConfig {
     pub width: u32,
     pub height: u32,
-    #[allow(dead_code)]
     pub note_fall_speed: f32,
     pub bloom_enabled: bool,
     pub particles_enabled: bool,

@@ -536,6 +536,8 @@ impl DspPipeline {
         let bass_fft = planner.plan_fft_forward(self.config.bass_fft_size);
         let mut bass_scratch = bass_fft.make_scratch_vec();
 
+        let mut frames_sent: u64 = 0;
+
         loop {
             // ---- collect hop_size new samples ----
             let hop = self.config.hop_size;
@@ -629,6 +631,10 @@ impl DspPipeline {
             {
                 debug!("Pitch channel closed — DSP shutting down");
                 return;
+            }
+            frames_sent += 1;
+            if frames_sent == 1 {
+                info!("DSP: first PitchFrame sent at sample {}", self.sample_count);
             }
         }
     }

@@ -8,6 +8,7 @@ use anyhow::{Context, Result};
 use crossbeam_channel::{Receiver, Sender};
 use tracing::info;
 
+use crate::config::AudioConfig;
 use crate::events::{NoteEvent, NoteEventKind};
 use crate::transport::{TransportCommand, TransportState};
 
@@ -179,17 +180,17 @@ struct TimedEvent {
 /// * Events are sent to `render_tx` for visualisation.
 /// * Simple sine audio is synthesised and pushed to `playback_producer`.
 /// * `clock` is advanced in lockstep so the renderer stays synchronised.
-#[allow(clippy::too_many_arguments)]
 pub fn stream_midi_file(
     path: &Path,
     render_tx: Sender<NoteEvent>,
     mut playback_producer: Option<rtrb::Producer<f32>>,
     clock: std::sync::Arc<crate::timing::AudioClock>,
-    sample_rate: u32,
-    chunk_size: usize,
+    audio_cfg: &AudioConfig,
     transport_rx: Receiver<TransportCommand>,
     transport_state: std::sync::Arc<TransportState>,
 ) -> Result<()> {
+    let sample_rate = audio_cfg.sample_rate;
+    let chunk_size = audio_cfg.buffer_frames;
     let data = std::fs::read(path)
         .with_context(|| format!("Cannot read MIDI file: {}", path.display()))?;
     let smf = midly::Smf::parse(&data).map_err(|e| anyhow::anyhow!("MIDI parse error: {e}"))?;
@@ -345,10 +346,9 @@ pub fn stream_midi_file(
         }
 
         // Ring-occupancy pacing: wait until the playback ring has room
-        // before pushing. This avoids the blocking spin_loop that would
-        // deadlock when the ring fills faster than the cpal callback drains.
+        // before pushing. Stereo output requires 2× samples per chunk.
         if let Some(ref pb) = playback_producer {
-            if pb.slots() < chunk_size {
+            if pb.slots() < chunk_size * 2 {
                 std::thread::sleep(std::time::Duration::from_millis(1));
                 continue;
             }
@@ -375,9 +375,10 @@ pub fn stream_midi_file(
         // Render synthesised audio for this chunk
         synth.render(&mut audio_buf);
 
-        // Push to playback ring (non-blocking, drop on full — matches audio_file pattern)
+        // Push stereo pairs to playback ring (duplicate mono synth output to L+R)
         if let Some(ref mut pb) = playback_producer {
             for &s in &audio_buf {
+                let _ = pb.push(s);
                 let _ = pb.push(s);
             }
         }

@@ -48,9 +48,9 @@ pub fn audio_file_sample_rate(path: &Path) -> Result<u32> {
 // Full decode
 // ---------------------------------------------------------------------------
 
-/// Decode an entire audio file to mono f32 samples.
-/// Returns `(samples, sample_rate)`.
-pub fn decode_audio_file(path: &Path) -> Result<(Vec<f32>, u32)> {
+/// Decode an entire audio file to interleaved f32 samples.
+/// Returns `(interleaved_samples, sample_rate, n_channels)`.
+pub fn decode_audio_file(path: &Path) -> Result<(Vec<f32>, u32, usize)> {
     let file =
         std::fs::File::open(path).with_context(|| format!("Cannot open: {}", path.display()))?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
@@ -104,25 +104,17 @@ pub fn decode_audio_file(path: &Path) -> Result<(Vec<f32>, u32)> {
         }
     }
 
-    // Downmix to mono
-    let mono: Vec<f32> = if n_channels > 1 {
-        all_samples
-            .chunks(n_channels)
-            .map(|frame| frame.iter().sum::<f32>() / frame.len() as f32)
-            .collect()
-    } else {
-        all_samples
-    };
+    let total_frames = all_samples.len() / n_channels;
 
     info!(
-        "Audio decoded: {} ch, {} Hz, {} mono samples ({:.1}s)",
+        "Audio decoded: {} ch, {} Hz, {} frames ({:.1}s)",
         n_channels,
         sample_rate,
-        mono.len(),
-        mono.len() as f64 / sample_rate as f64
+        total_frames,
+        total_frames as f64 / sample_rate as f64
     );
 
-    Ok((mono, sample_rate))
+    Ok((all_samples, sample_rate, n_channels))
 }
 
 // ---------------------------------------------------------------------------
@@ -131,6 +123,12 @@ pub fn decode_audio_file(path: &Path) -> Result<(Vec<f32>, u32)> {
 
 /// Decode an audio file and stream it at real-time pace into the DSP and
 /// playback ring buffers.
+///
+/// The DSP ring receives **mono** samples (downmixed on the fly).
+/// The playback ring receives **stereo interleaved** samples (preserving the
+/// original stereo field, or duplicating mono to L+R).
+/// The two rings are fed **independently** so that a slow DSP consumer cannot
+/// starve the playback ring.
 pub fn stream_audio_file(
     path: &Path,
     mut producer: rtrb::Producer<f32>,
@@ -140,24 +138,37 @@ pub fn stream_audio_file(
     transport_rx: Receiver<TransportCommand>,
     transport_state: std::sync::Arc<TransportState>,
 ) -> Result<()> {
-    let (mono, _sr) = decode_audio_file(path)?;
-    transport_state.set_total_samples(mono.len() as u64);
+    let (samples, _sr, n_channels) = decode_audio_file(path)?;
+    let total_frames = samples.len() / n_channels;
+    transport_state.set_total_samples(total_frames as u64);
 
-    let mut cursor: usize = 0;
+    // Pre-compute mono for the DSP ring (pitch detection needs mono).
+    let mono: Vec<f32> = if n_channels > 1 {
+        samples
+            .chunks(n_channels)
+            .map(|frame| frame.iter().sum::<f32>() / frame.len() as f32)
+            .collect()
+    } else {
+        samples.clone()
+    };
+
     let mut paused = transport_state.is_paused();
 
     // ---- Pre-fill rings with initial audio for output headroom ----
-    let prefill = (chunk_size * 4).min(mono.len());
-    for &sample in &mono[cursor..prefill] {
-        let _ = producer.push(sample);
+    let prefill = (chunk_size * 4).min(total_frames);
+    for (m, frame) in mono[..prefill].iter().zip(samples.chunks(n_channels)) {
+        let _ = producer.push(*m);
         if let Some(ref mut pb) = playback_producer {
-            let _ = pb.push(sample);
+            let _ = pb.push(frame[0]);
+            let _ = pb.push(if n_channels >= 2 { frame[1] } else { frame[0] });
         }
     }
-    cursor = prefill;
+    let mut dsp_cursor: usize = prefill;
+    let mut pb_cursor: usize = prefill;
+    let mut clock_pos: usize = prefill;
     clock.advance(prefill as u64);
 
-    while cursor < mono.len() {
+    while dsp_cursor < total_frames || pb_cursor < total_frames {
         while let Ok(cmd) = transport_rx.try_recv() {
             match cmd {
                 TransportCommand::Play => {
@@ -169,8 +180,10 @@ pub fn stream_audio_file(
                     transport_state.set_paused(true);
                 }
                 TransportCommand::SeekSamples(sample) => {
-                    let target = sample.min(mono.len() as u64) as usize;
-                    cursor = target;
+                    let target = sample.min(total_frames as u64) as usize;
+                    dsp_cursor = target;
+                    pb_cursor = target;
+                    clock_pos = target;
                     clock.set_samples(target as u64);
                 }
             }
@@ -181,28 +194,50 @@ pub fn stream_audio_file(
             continue;
         }
 
-        // ---- Ring-occupancy pacing: push only when there's room ----
-        let dsp_slots = producer.slots();
-        let pb_slots = playback_producer
-            .as_ref()
-            .map(|p| p.slots())
-            .unwrap_or(usize::MAX);
-        let available = dsp_slots.min(pb_slots);
+        let mut did_work = false;
 
-        if available >= chunk_size {
-            let chunk_end = (cursor + chunk_size).min(mono.len());
-            let chunk = &mono[cursor..chunk_end];
-
-            for &sample in chunk {
-                let _ = producer.push(sample);
-                if let Some(ref mut pb) = playback_producer {
-                    let _ = pb.push(sample);
+        // ---- Feed DSP ring (mono) ----
+        if dsp_cursor < total_frames {
+            let dsp_slots = producer.slots();
+            if dsp_slots >= chunk_size {
+                let end = (dsp_cursor + chunk_size).min(total_frames);
+                for &s in &mono[dsp_cursor..end] {
+                    let _ = producer.push(s);
                 }
+                dsp_cursor = end;
+                did_work = true;
             }
+        }
 
-            clock.advance(chunk.len() as u64);
-            cursor = chunk_end;
-        } else {
+        // ---- Feed playback ring (stereo interleaved, independent of DSP) ----
+        if pb_cursor < total_frames {
+            if let Some(ref mut pb) = playback_producer {
+                let pb_slots = pb.slots();
+                let needed = chunk_size * 2; // stereo: 2 samples per frame
+                if pb_slots >= needed {
+                    let end = (pb_cursor + chunk_size).min(total_frames);
+                    for frame in
+                        samples[pb_cursor * n_channels..end * n_channels].chunks(n_channels)
+                    {
+                        let _ = pb.push(frame[0]);
+                        let _ = pb.push(if n_channels >= 2 { frame[1] } else { frame[0] });
+                    }
+                    pb_cursor = end;
+                    did_work = true;
+                }
+            } else {
+                pb_cursor = total_frames;
+            }
+        }
+
+        // ---- Advance clock to the slower consumer's position ----
+        let new_pos = dsp_cursor.min(pb_cursor);
+        if new_pos > clock_pos {
+            clock.advance((new_pos - clock_pos) as u64);
+            clock_pos = new_pos;
+        }
+
+        if !did_work {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
     }
