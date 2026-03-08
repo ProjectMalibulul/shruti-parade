@@ -25,7 +25,8 @@ use crate::transport::{TransportCommand, TransportState};
 
 const MAX_NOTE_INSTANCES: usize = 4096;
 const MAX_PARTICLE_INSTANCES: usize = 2048;
-const MAX_UI_INSTANCES: usize = 24;
+const MAX_UI_INSTANCES: usize = 64;
+const MAX_KEY_INSTANCES: usize = 256; // 88 keys + pedal + heat bar
 
 const HIT_LINE_Y: f32 = -0.8; // NDC y where notes "land"
 const SCROLL_SPEED: f32 = 0.5; // NDC per second
@@ -126,6 +127,9 @@ pub fn run_render(
         cursor_ndc: None,
         pedal_brightness: 0.0,
         pedal_held: false,
+        fps_accum: 0.0,
+        fps_frame_count: 0,
+        current_fps: 60.0,
     };
     event_loop.run_app(&mut app)?;
     Ok(())
@@ -150,6 +154,10 @@ struct App {
     cursor_ndc: Option<[f32; 2]>,
     pedal_brightness: f32,
     pedal_held: bool,
+    // FPS counter state
+    fps_accum: f32,
+    fps_frame_count: u32,
+    current_fps: f32,
 }
 
 /// All GPU resources: surface, device, pipelines, buffers, bloom textures.
@@ -825,10 +833,11 @@ impl GpuState {
         });
 
         let key_instances = build_piano_keys();
-        let key_instance_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        let key_instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("key-instances"),
-            contents: bytemuck::cast_slice(&key_instances),
+            size: (MAX_KEY_INSTANCES * std::mem::size_of::<KeyInstance>()) as u64,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
         });
 
         let ui_instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -950,6 +959,15 @@ impl ApplicationHandler for App {
                 let now = Instant::now();
                 let dt = now.duration_since(self.last_frame).as_secs_f32();
                 self.last_frame = now;
+
+                // FPS tracking (update once per second)
+                self.fps_accum += dt;
+                self.fps_frame_count += 1;
+                if self.fps_accum >= 1.0 {
+                    self.current_fps = self.fps_frame_count as f32 / self.fps_accum;
+                    self.fps_accum = 0.0;
+                    self.fps_frame_count = 0;
+                }
 
                 self.update_notes(dt);
                 self.render_frame();
@@ -1220,7 +1238,39 @@ impl App {
                 });
             }
 
-            key_draw_count = keys.len();
+            // ---- Pitch confidence heat bar ----
+            // Thin colored bars above the piano keyboard showing per-pitch
+            // activity. Active notes glow brightly; recently-released notes fade.
+            let heat_y = -0.835; // just above piano keys
+            let heat_h = 0.012;
+            let key_w = 2.0 / PIANO_RANGE;
+            for note in &self.visual_notes {
+                if note.pitch < PIANO_MIN || note.pitch > PIANO_MAX {
+                    continue;
+                }
+                let intensity = if note.end_time.is_none() {
+                    (note.velocity as f32 / 127.0).clamp(0.3, 1.0)
+                } else {
+                    // Fade out recently-released notes
+                    let elapsed = (now - note.end_time.unwrap()) as f32;
+                    (1.0 - elapsed * 2.0).max(0.0) * 0.5
+                };
+                if intensity < 0.01 {
+                    continue;
+                }
+                let x = pitch_to_ndc_x(note.pitch);
+                let hue = pitch_to_hue(note.pitch);
+                let (r, g, b) = hsv_to_rgb(hue, 0.8, intensity);
+                keys.push(KeyInstance {
+                    position: [x, heat_y],
+                    size: [key_w * 0.7, heat_h],
+                    color: [r, g, b, intensity],
+                    border_radius: 0.2,
+                    _pad: [0.0; 3],
+                });
+            }
+
+            key_draw_count = keys.len().min(MAX_KEY_INSTANCES);
             gpu.queue
                 .write_buffer(&gpu.key_instance_buffer, 0, bytemuck::cast_slice(&keys));
         }
@@ -1256,6 +1306,23 @@ impl App {
                 color: [r, g, b, a],
                 border_radius: 0.2,
                 glow_intensity: if is_active { 0.8 } else { 0.2 },
+                _pad: [0.0; 2],
+            });
+
+            // ---- Note label accent strip ----
+            // Bright thin bar at bottom of each note, using a 12-tone
+            // pitch-class colour palette for quick visual identification.
+            let label_h = 0.012_f32.min(note_h * 0.3);
+            let label_y = y_bot + label_h * 0.5;
+            let pc = note.pitch % 12;
+            let label_hue = pc as f32 * 30.0; // 30° steps for 12 classes
+            let (lr, lg, lb) = hsv_to_rgb(label_hue, 1.0, 1.0);
+            note_instances.push(NoteInstance {
+                position: [x, label_y],
+                size: [note_w, label_h],
+                color: [lr, lg, lb, a.min(0.9)],
+                border_radius: 0.0,
+                glow_intensity: 0.0,
                 _pad: [0.0; 2],
             });
         }
@@ -1359,6 +1426,41 @@ impl App {
                     _pad: [0.0; 3],
                 });
             }
+        }
+
+        // ---- FPS counter bar (top-right corner) ----
+        // Width proportional to FPS: full width at 120 FPS, half at 60.
+        {
+            let fps_fraction = (self.current_fps / 120.0).clamp(0.0, 1.0);
+            let bar_max_w = 0.12;
+            let bar_w = bar_max_w * fps_fraction;
+            let bar_h = 0.015;
+            let bar_x = 0.93 - (bar_max_w - bar_w) * 0.5;
+            let bar_y = 0.97;
+            // Green when >55 FPS, yellow <55, red <30
+            let (fr, fg, fb) = if self.current_fps >= 55.0 {
+                (0.2, 0.9, 0.3)
+            } else if self.current_fps >= 30.0 {
+                (0.9, 0.8, 0.2)
+            } else {
+                (0.9, 0.2, 0.2)
+            };
+            // Background
+            ui_instances.push(KeyInstance {
+                position: [0.93, bar_y],
+                size: [bar_max_w, bar_h],
+                color: [0.1, 0.1, 0.12, 0.6],
+                border_radius: 0.2,
+                _pad: [0.0; 3],
+            });
+            // Fill
+            ui_instances.push(KeyInstance {
+                position: [bar_x, bar_y],
+                size: [bar_w, bar_h * 0.7],
+                color: [fr, fg, fb, 0.85],
+                border_radius: 0.2,
+                _pad: [0.0; 3],
+            });
         }
 
         let ui_count = ui_instances.len().min(MAX_UI_INSTANCES);

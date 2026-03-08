@@ -1,4 +1,5 @@
 use crossbeam_channel::{Receiver, Sender};
+use std::collections::HashSet;
 use tracing::{debug, info};
 
 use crate::config::InferenceConfig;
@@ -50,6 +51,17 @@ impl InferenceEngine {
         let mut below_count = [0u32; N_PITCHES];
         let mut cooldown = [0u32; N_PITCHES];
         let mut active_count: usize = 0;
+
+        // Sustain pedal simulation: detect when multiple notes overlap
+        // (typical of pedaled passages) and extend their release window.
+        let mut pedal_held = false;
+        let mut sustained_notes: HashSet<u8> = HashSet::new();
+        let mut active_frames = [0u32; N_PITCHES];
+        // When ≥3 notes overlap for ≥4 frames, engage simulated pedal
+        const PEDAL_OVERLAP_THRESHOLD: usize = 3;
+        const PEDAL_ENGAGE_FRAMES: u32 = 4;
+        // Extended release when pedal is engaged
+        const SUSTAINED_RELEASE_FRAMES: u32 = 24;
 
         // Noise floor starts very low — warmup will calibrate it
         for nf in noise_floor.iter_mut() {
@@ -141,6 +153,12 @@ impl InferenceEngine {
             }
 
             // ---- 3. Per-pitch onset / offset ----
+            // Detect pedal engagement: many overlapping long-held notes
+            let long_active = (PIANO_LO as usize..=PIANO_HI as usize)
+                .filter(|&i| active[i] && active_frames[i] >= PEDAL_ENGAGE_FRAMES)
+                .count();
+            pedal_held = long_active >= PEDAL_OVERLAP_THRESHOLD;
+
             for pitch in PIANO_LO..=PIANO_HI {
                 let i = pitch as usize;
                 let e = filtered[i];
@@ -187,6 +205,7 @@ impl InferenceEngine {
                                     onset_pending[i] = 0;
                                     peak_energy[i] = e;
                                     below_count[i] = 0;
+                                    active_frames[i] = 0;
                                     active_count += 1;
 
                                     let _ = self.event_tx.send(NoteEvent {
@@ -211,6 +230,8 @@ impl InferenceEngine {
                     }
                 } else {
                     // ---- Active note: track peak & detect offset ----
+                    active_frames[i] += 1;
+
                     if e > peak_energy[i] {
                         peak_energy[i] = e;
                     }
@@ -218,12 +239,21 @@ impl InferenceEngine {
                     let off_thresh = (noise_floor[i] * release_ratio).max(abs_min_energy * 0.5);
                     let peak_drop = peak_energy[i] / peak_decay_ratio;
 
+                    // Use extended release window when sustain pedal is engaged
+                    let effective_release = if pedal_held {
+                        SUSTAINED_RELEASE_FRAMES
+                    } else {
+                        release_frames
+                    };
+
                     if e < off_thresh || e < peak_drop {
                         below_count[i] += 1;
-                        if below_count[i] >= release_frames {
+                        if below_count[i] >= effective_release {
                             active[i] = false;
+                            active_frames[i] = 0;
                             active_count = active_count.saturating_sub(1);
                             cooldown[i] = retrigger_cooldown;
+                            sustained_notes.remove(&pitch);
                             let _ = self.event_tx.send(NoteEvent {
                                 kind: NoteEventKind::NoteOff,
                                 pitch,
@@ -233,6 +263,9 @@ impl InferenceEngine {
                         }
                     } else {
                         below_count[i] = 0;
+                        if pedal_held {
+                            sustained_notes.insert(pitch);
+                        }
                     }
                 }
 
@@ -328,5 +361,108 @@ mod inference_tests {
             has_note_off,
             "Expected NoteOff for pitch {target_pitch}, got events: {events:?}"
         );
+    }
+
+    #[test]
+    fn test_sustain_pedal_holds_note() {
+        // When ≥3 notes overlap, the simulated sustain pedal should engage
+        // and extend the release window, delaying NoteOff.
+        let (pitch_tx, pitch_rx) = crossbeam_channel::unbounded();
+        let (event_tx, event_rx) = crossbeam_channel::unbounded();
+        let config = default_inference_config();
+
+        let handle = std::thread::spawn(move || {
+            let mut engine = InferenceEngine::new(config, pitch_rx, event_tx);
+            engine.run();
+        });
+
+        // 30 warmup frames
+        for i in 0..30 {
+            pitch_tx
+                .send(PitchFrame {
+                    pitch_energy: [0.0; 128],
+                    sample_offset: i * 512,
+                })
+                .unwrap();
+        }
+
+        // Onset 3 notes simultaneously (C4=60, E4=64, G4=67) for 20 frames
+        for i in 30..50 {
+            let mut energy = [0.0f32; 128];
+            energy[60] = 500.0;
+            energy[64] = 400.0;
+            energy[67] = 350.0;
+            pitch_tx
+                .send(PitchFrame {
+                    pitch_energy: energy,
+                    sample_offset: i * 512,
+                })
+                .unwrap();
+        }
+
+        // Drop energy for C4 only, but keep E4+G4 active
+        // With only standard release_frames=8, C4 would turn off quickly.
+        // With pedal engaged (3 overlapping notes), release extends to 24.
+        for i in 50..60 {
+            let mut energy = [0.0f32; 128];
+            energy[60] = 0.0; // C4 dropped
+            energy[64] = 400.0;
+            energy[67] = 350.0;
+            pitch_tx
+                .send(PitchFrame {
+                    pitch_energy: energy,
+                    sample_offset: i * 512,
+                })
+                .unwrap();
+        }
+
+        // At frame 60 (10 frames after drop), C4 should still be held by pedal
+        // because sustained release is 24 frames
+        // Send enough frames for C4 to eventually release
+        for i in 60..90 {
+            let mut energy = [0.0f32; 128];
+            energy[64] = 400.0;
+            energy[67] = 350.0;
+            pitch_tx
+                .send(PitchFrame {
+                    pitch_energy: energy,
+                    sample_offset: i * 512,
+                })
+                .unwrap();
+        }
+
+        drop(pitch_tx);
+        handle.join().unwrap();
+
+        let events: Vec<NoteEvent> = event_rx.try_iter().collect();
+
+        // All three notes should have been onset
+        let onsets: Vec<u8> = events
+            .iter()
+            .filter(|e| e.kind == NoteEventKind::NoteOn)
+            .map(|e| e.pitch)
+            .collect();
+        assert!(onsets.contains(&60), "C4 should have onset");
+        assert!(onsets.contains(&64), "E4 should have onset");
+        assert!(onsets.contains(&67), "G4 should have onset");
+
+        // C4 should eventually get NoteOff (after extended sustain)
+        let c4_off = events
+            .iter()
+            .find(|e| e.kind == NoteEventKind::NoteOff && e.pitch == 60);
+        assert!(
+            c4_off.is_some(),
+            "C4 should eventually get NoteOff after sustain release"
+        );
+
+        // Verify that C4's NoteOff came after frame 58 (i.e., was held
+        // beyond the standard 8-frame release window)
+        if let Some(off_event) = c4_off {
+            let off_frame = off_event.sample_time / 512;
+            assert!(
+                off_frame > 58,
+                "C4 NoteOff at frame {off_frame} — expected >58 (sustain should delay release)"
+            );
+        }
     }
 }

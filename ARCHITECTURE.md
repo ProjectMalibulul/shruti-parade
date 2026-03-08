@@ -40,13 +40,15 @@ Shruti Parade uses a pipeline of 4–5 dedicated threads communicating via lock-
 
 For MIDI file input, the pipeline is simplified: T0 parses the MIDI file, generates `NoteEvent`s directly, and drives a sine synthesiser for audio playback. Threads T1–T2 are not used.
 
+With the `--basic-pitch` flag, audio files are first transcribed to MIDI using spotify/basic-pitch (Python subprocess), then played through the MIDI pipeline.
+
 ## Data Flow
 
 ### 1. Audio Ingestion (`audio.rs`, `audio_file.rs`)
 
 Audio samples enter the system as mono `f32` values:
 - **Live capture**: cpal audio callback pushes samples into an `rtrb` ring buffer. The callback is real-time safe (no allocations, no locks, no syscalls).
-- **Audio file**: symphonia decodes the file to PCM, then streams chunks at real-time pace using `thread::sleep` for pacing. Samples are pushed to both a DSP ring and a playback ring.
+- **Audio file**: symphonia decodes the file to PCM, then streams chunks using ring-occupancy pacing (checking `Producer::slots()` with 1 ms polling instead of imprecise `thread::sleep`). The playback ring is pre-filled with `buffer_frames × 4` samples for jitter headroom. The output callback uses sample-hold fallback (repeating the last sample instead of silence) to prevent clicks during brief underruns.
 
 ### 2. DSP Pipeline (`dsp.rs`)
 
@@ -72,9 +74,13 @@ Complex FFT output → magnitude: `|X(k)| = √(Re² + Im²)`. The magnitudes ar
 
 For each of the 88 piano keys (MIDI 21–108), a **harmonic template** pre-computes the FFT bin indices and weights for the fundamental and up to 8 harmonics:
 
-- **Bin mapping**: `bin(h) = round(f₀ × h × N / SR)`, clamped to Nyquist × 0.95
+- **Bin mapping**: `bin(h) = round(f₀ × h × √(1 + B × h²) × N / SR)`, where B is the per-pitch inharmonicity coefficient. Piano strings exhibit stretched partials; B ranges from ~0.00003 (mid-register) to ~0.002 (high treble)
 - **Weights**: `w(h) = 1/h` — natural harmonic decay weighting
 - **Neighbourhood**: ±1 bin around each harmonic is checked (max of 3 bins) to handle spectral leakage
+
+#### Dual-Resolution FFT
+
+Bass notes (MIDI 21–47, A0–B2) use an 8192-point FFT for ~5.9 Hz/bin resolution, while mid/treble (MIDI 48–108, C3–C8) use the standard 4096-point FFT (~11.7 Hz/bin). Both FFTs run on every hop and their per-pitch energies are merged in the pitch energy array.
 
 The **pitch energy score** is the weighted arithmetic mean:
 
@@ -99,9 +105,10 @@ The inference engine operates on `PitchFrame`s from the DSP thread:
 1. **Local-max filter**: Only pitches that are local maxima within ±2 semitones survive
 2. **Noise floor tracking**: Per-pitch adaptive noise floor with asymmetric rise/fall rates
 3. **Onset detection**: Requires BOTH energy above SNR threshold AND frame-over-frame flux ratio > 1.5, confirmed across 2 consecutive frames
-4. **Offset detection**: Triggered when energy falls below the noise floor or drops to 1/5 of peak energy for 8 consecutive frames
-5. **Polyphony limit**: Maximum 10 simultaneous notes to prevent noise from flooding the output
-6. **Retrigger cooldown**: 6-frame cooldown after note-off before the same pitch can re-onset
+4. **Offset detection**: Triggered when energy falls below the noise floor or drops to 1/5 of peak energy for 8 consecutive frames (or 24 frames when sustain is engaged)
+5. **Sustain pedal simulation**: When ≥3 notes overlap for ≥4 frames (typical of pedaled passages), a simulated sustain pedal engages, extending the release window from 8 to 24 frames. This prevents premature note-offs in legato/pedaled playing
+6. **Polyphony limit**: Maximum 10 simultaneous notes to prevent noise from flooding the output
+7. **Retrigger cooldown**: 6-frame cooldown after note-off before the same pitch can re-onset
 
 ### 4. MIDI Router (`midi_router.rs`)
 
@@ -151,7 +158,7 @@ At 48 kHz sample rate with 4096-point FFT:
 | A4 (440.0 Hz) | ~37.6 bins | 11.7 Hz | ~25.7 |
 | C8 (4186 Hz) | ~357.8 bins | 11.7 Hz | ~220 |
 
-Low-register notes (A0–C2) have poor fundamental resolution but benefit from the harmonic sieve, which aggregates energy across multiple well-resolved upper harmonics. Increasing `fft_size` to 8192 doubles resolution at the cost of ~85 ms latency per frame (vs ~43 ms at 4096).
+Low-register notes (A0–C2) now use a dedicated 8192-point FFT (~5.9 Hz/bin) for improved fundamental resolution, while mid/treble notes use the standard 4096-point FFT (~11.7 Hz/bin). Both FFTs run on every hop with negligible additional latency. Inharmonicity coefficients (B) stretch template bin positions to match real piano string behaviour.
 
 ## Dependencies
 

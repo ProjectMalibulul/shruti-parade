@@ -95,9 +95,30 @@ const MAX_HARMONICS: usize = 8;
 /// note's upper partials (e.g. perfect-fifth ghost notes).
 const FUNDAMENTAL_GATE: f32 = 0.10;
 
+/// Bass/treble crossover: pitches below this MIDI number use the bass FFT.
+const BASS_CROSSOVER: u8 = 48; // C3
+
+/// Approximate inharmonicity coefficient B for a typical grand piano.
+/// Piano strings exhibit stretched partials: f_n = n·f0·√(1 + B·n²).
+fn inharmonicity_b(midi: u8) -> f32 {
+    match midi {
+        21..=35 => 0.0004,
+        36..=47 => 0.00015,
+        48..=59 => 0.00005,
+        60..=71 => 0.00003,
+        72..=84 => 0.0001,
+        85..=96 => 0.0005,
+        97..=108 => 0.002,
+        _ => 0.0,
+    }
+}
+
 /// Build harmonic templates for all 88 piano keys (MIDI 21–108).
 /// Returns a 128-element Vec indexed by MIDI pitch; entries outside
 /// the piano range are `None`.
+///
+/// Harmonic positions are adjusted for piano inharmonicity so that
+/// template bins match the stretched partial frequencies of real strings.
 pub fn build_harmonic_templates(
     sample_rate: f32,
     fft_size: usize,
@@ -109,11 +130,12 @@ pub fn build_harmonic_templates(
 
     for midi in PIANO_LO..=PIANO_HI {
         let f0 = midi_to_hz(midi);
+        let b = inharmonicity_b(midi);
         let mut bins = Vec::new();
         let mut weights = Vec::new();
 
         for h in 1..=MAX_HARMONICS {
-            let fh = f0 * h as f32;
+            let fh = f0 * h as f32 * (1.0 + b * (h as f32).powi(2)).sqrt();
             if fh >= nyquist * 0.95 {
                 break;
             }
@@ -442,6 +464,13 @@ pub struct DspPipeline {
     fft_out: Vec<Complex<f32>>,
     magnitudes: Vec<f32>,
     harmonic_templates: Vec<Option<HarmonicTemplate>>,
+    // Bass FFT (8192-pt) for improved low-pitch resolution
+    bass_circ: CircBuf,
+    bass_hann: Vec<f32>,
+    bass_fft_in: Vec<f32>,
+    bass_fft_out: Vec<Complex<f32>>,
+    bass_magnitudes: Vec<f32>,
+    bass_templates: Vec<Option<HarmonicTemplate>>,
     sample_count: u64,
     sample_rate: f32,
     mpm_buf: Vec<f32>,
@@ -465,6 +494,17 @@ impl DspPipeline {
 
         let harmonic_templates = build_harmonic_templates(sample_rate as f32, config.fft_size);
 
+        // Bass FFT path (larger window for low-frequency resolution)
+        let bass_fft = config.bass_fft_size;
+        let bass_n_bins = bass_fft / 2 + 1;
+        let bass_hann: Vec<f32> = (0..bass_fft)
+            .map(|i| {
+                let phase = 2.0 * std::f32::consts::PI * i as f32 / bass_fft as f32;
+                0.5 * (1.0 - phase.cos())
+            })
+            .collect();
+        let bass_templates = build_harmonic_templates(sample_rate as f32, bass_fft);
+
         Self {
             circ: CircBuf::new(config.fft_size),
             hann,
@@ -472,6 +512,12 @@ impl DspPipeline {
             fft_out: vec![Complex::default(); n_bins],
             magnitudes: vec![0.0; n_bins],
             harmonic_templates,
+            bass_circ: CircBuf::new(bass_fft),
+            bass_hann,
+            bass_fft_in: vec![0.0; bass_fft],
+            bass_fft_out: vec![Complex::default(); bass_n_bins],
+            bass_magnitudes: vec![0.0; bass_n_bins],
+            bass_templates,
             consumer,
             pitch_tx,
             sample_count: 0,
@@ -484,13 +530,15 @@ impl DspPipeline {
     /// Blocking DSP loop — call from a dedicated thread.
     pub fn run(&mut self) {
         info!(
-            "DSP pipeline started (fft={}, hop={}, harmonic sieve)",
-            self.config.fft_size, self.config.hop_size,
+            "DSP pipeline started (fft={}/{}, hop={}, harmonic sieve + inharmonicity)",
+            self.config.fft_size, self.config.bass_fft_size, self.config.hop_size,
         );
 
         let mut planner = RealFftPlanner::<f32>::new();
         let fft = planner.plan_fft_forward(self.config.fft_size);
         let mut scratch = fft.make_scratch_vec();
+        let bass_fft = planner.plan_fft_forward(self.config.bass_fft_size);
+        let mut bass_scratch = bass_fft.make_scratch_vec();
 
         loop {
             // ---- collect hop_size new samples ----
@@ -501,6 +549,7 @@ impl DspPipeline {
                 match self.consumer.pop() {
                     Ok(s) => {
                         self.circ.push(s);
+                        self.bass_circ.push(s);
                         collected += 1;
                     }
                     Err(_) => {
@@ -512,13 +561,12 @@ impl DspPipeline {
 
             self.sample_count += hop as u64;
 
-            // ---- linearise circular buffer + apply Hann window ----
+            // ---- Standard FFT (4096-pt) for mid/treble ----
             self.circ.linearise_into(&mut self.fft_in);
             for (s, w) in self.fft_in.iter_mut().zip(self.hann.iter()) {
                 *s *= w;
             }
 
-            // ---- real FFT ----
             if fft
                 .process_with_scratch(&mut self.fft_in, &mut self.fft_out, &mut scratch)
                 .is_err()
@@ -526,13 +574,48 @@ impl DspPipeline {
                 continue;
             }
 
-            // ---- compute magnitudes ----
             for (i, c) in self.fft_out.iter().enumerate() {
                 self.magnitudes[i] = (c.re * c.re + c.im * c.im).sqrt();
             }
 
-            // ---- harmonic sieve → per-pitch energies ----
-            let mut pitch_energy = compute_pitch_energies(&self.magnitudes, &self.harmonic_templates);
+            // ---- Bass FFT (8192-pt) for improved low-pitch resolution ----
+            self.bass_circ.linearise_into(&mut self.bass_fft_in);
+            for (s, w) in self.bass_fft_in.iter_mut().zip(self.bass_hann.iter()) {
+                *s *= w;
+            }
+
+            let bass_ok = bass_fft
+                .process_with_scratch(
+                    &mut self.bass_fft_in,
+                    &mut self.bass_fft_out,
+                    &mut bass_scratch,
+                )
+                .is_ok();
+
+            if bass_ok {
+                for (i, c) in self.bass_fft_out.iter().enumerate() {
+                    self.bass_magnitudes[i] = (c.re * c.re + c.im * c.im).sqrt();
+                }
+            }
+
+            // ---- Harmonic sieve → per-pitch energies (dual resolution) ----
+            let energy_std = compute_pitch_energies(&self.magnitudes, &self.harmonic_templates);
+            let energy_bass = if bass_ok {
+                compute_pitch_energies(&self.bass_magnitudes, &self.bass_templates)
+            } else {
+                energy_std
+            };
+
+            // Merge: bass FFT for MIDI 21–47, standard FFT for MIDI 48–108
+            let mut pitch_energy = [0.0f32; 128];
+            for midi in PIANO_LO..=PIANO_HI {
+                let i = midi as usize;
+                pitch_energy[i] = if midi < BASS_CROSSOVER {
+                    energy_bass[i]
+                } else {
+                    energy_std[i]
+                };
+            }
 
             // ---- MPM refinement (unwindowed signal) ----
             self.circ.linearise_into(&mut self.mpm_buf);

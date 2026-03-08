@@ -19,6 +19,7 @@ pub struct AudioConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct DspConfig {
     pub fft_size: usize,
+    pub bass_fft_size: usize,
     pub hop_size: usize,
     #[allow(dead_code)]
     pub n_mels: usize,
@@ -60,6 +61,7 @@ impl Default for EngineConfig {
             },
             dsp: DspConfig {
                 fft_size: 4096,
+                bass_fft_size: 8192,
                 hop_size: 512,
                 n_mels: 229,
                 mel_fmin: 30.0,

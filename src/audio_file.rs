@@ -140,11 +140,22 @@ pub fn stream_audio_file(
     transport_rx: Receiver<TransportCommand>,
     transport_state: std::sync::Arc<TransportState>,
 ) -> Result<()> {
-    let (mono, sr) = decode_audio_file(path)?;
+    let (mono, _sr) = decode_audio_file(path)?;
     transport_state.set_total_samples(mono.len() as u64);
 
     let mut cursor: usize = 0;
     let mut paused = transport_state.is_paused();
+
+    // ---- Pre-fill rings with initial audio for output headroom ----
+    let prefill = (chunk_size * 4).min(mono.len());
+    for &sample in &mono[cursor..prefill] {
+        let _ = producer.push(sample);
+        if let Some(ref mut pb) = playback_producer {
+            let _ = pb.push(sample);
+        }
+    }
+    cursor = prefill;
+    clock.advance(prefill as u64);
 
     while cursor < mono.len() {
         while let Ok(cmd) = transport_rx.try_recv() {
@@ -170,25 +181,30 @@ pub fn stream_audio_file(
             continue;
         }
 
-        let chunk_end = (cursor + chunk_size).min(mono.len());
-        let chunk = &mono[cursor..chunk_end];
+        // ---- Ring-occupancy pacing: push only when there's room ----
+        let dsp_slots = producer.slots();
+        let pb_slots = playback_producer
+            .as_ref()
+            .map(|p| p.slots())
+            .unwrap_or(usize::MAX);
+        let available = dsp_slots.min(pb_slots);
 
-        for &sample in chunk {
-            while producer.push(sample).is_err() {
-                std::hint::spin_loop();
-            }
-            if let Some(ref mut pb) = playback_producer {
-                while pb.push(sample).is_err() {
-                    std::hint::spin_loop();
+        if available >= chunk_size {
+            let chunk_end = (cursor + chunk_size).min(mono.len());
+            let chunk = &mono[cursor..chunk_end];
+
+            for &sample in chunk {
+                let _ = producer.push(sample);
+                if let Some(ref mut pb) = playback_producer {
+                    let _ = pb.push(sample);
                 }
             }
+
+            clock.advance(chunk.len() as u64);
+            cursor = chunk_end;
+        } else {
+            std::thread::sleep(std::time::Duration::from_millis(1));
         }
-
-        clock.advance(chunk.len() as u64);
-        cursor = chunk_end;
-
-        let sleep_per_chunk = std::time::Duration::from_secs_f64(chunk.len() as f64 / sr as f64);
-        std::thread::sleep(sleep_per_chunk);
     }
 
     info!("Audio file playback complete");

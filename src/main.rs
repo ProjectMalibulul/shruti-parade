@@ -1,5 +1,6 @@
 mod audio;
 mod audio_file;
+mod basic_pitch;
 mod config;
 mod dsp;
 mod events;
@@ -33,12 +34,16 @@ use transport::TransportState;
 // ---------------------------------------------------------------------------
 
 enum InputMode {
-    AudioFile(PathBuf), // WAV, MP3, FLAC, OGG, …
-    MidiFile(PathBuf),  // .mid / .midi
-    LiveCapture,        // microphone
+    AudioFile(PathBuf),          // WAV, MP3, FLAC, OGG, …
+    AudioFileBasicPitch(PathBuf), // Audio → basic-pitch MIDI transcription
+    MidiFile(PathBuf),           // .mid / .midi
+    LiveCapture,                 // microphone
 }
 
-fn detect_mode(path: Option<PathBuf>) -> InputMode {
+fn detect_mode(args: &[String]) -> InputMode {
+    let use_basic_pitch = args.iter().any(|a| a == "--basic-pitch");
+    let path = args.iter().find(|a| !a.starts_with('-')).map(PathBuf::from);
+
     match path {
         Some(p) => {
             let ext = p
@@ -48,7 +53,8 @@ fn detect_mode(path: Option<PathBuf>) -> InputMode {
                 .unwrap_or_default();
             match ext.as_str() {
                 "mid" | "midi" => InputMode::MidiFile(p),
-                _ => InputMode::AudioFile(p), // symphonia will reject truly unsupported formats
+                _ if use_basic_pitch => InputMode::AudioFileBasicPitch(p),
+                _ => InputMode::AudioFile(p),
             }
         }
         None => InputMode::LiveCapture,
@@ -72,8 +78,8 @@ fn main() -> Result<()> {
 
     let config = EngineConfig::default();
 
-    let file_path: Option<PathBuf> = std::env::args().nth(1).map(PathBuf::from);
-    let mode = detect_mode(file_path);
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mode = detect_mode(&args);
 
     // ---- render channel (always needed) ----
     let (render_tx, render_rx) = crossbeam_channel::bounded::<NoteEvent>(256);
@@ -127,6 +133,46 @@ fn main() -> Result<()> {
                         transport_state_thread,
                     ) {
                         tracing::error!("MIDI file error: {e:#}");
+                    }
+                })?;
+        }
+
+        // ══════════════════════════════════════════════════════════════════
+        // Audio file + basic-pitch: transcribe to MIDI, then play as MIDI
+        // ══════════════════════════════════════════════════════════════════
+        InputMode::AudioFileBasicPitch(path) => {
+            info!("Transcribing with basic-pitch: {}", path.display());
+
+            let tmp_dir = std::env::temp_dir().join("shruti-parade");
+            let midi_path = basic_pitch::transcribe_to_midi(&path, &tmp_dir)?;
+            info!("Using transcribed MIDI: {}", midi_path.display());
+
+            _playback_handle = Some(AudioPlayback::start(
+                config.audio.sample_rate,
+                config.audio.buffer_frames,
+                playback_cons,
+            )?);
+            _audio_handle = None;
+
+            let clock_bp = clock.clone();
+            let sr = config.audio.sample_rate;
+            let chunk = config.audio.buffer_frames;
+            let transport_state_thread = transport_state.clone();
+            let transport_rx_thread = transport_rx.clone();
+            std::thread::Builder::new()
+                .name("basic-pitch-midi".into())
+                .spawn(move || {
+                    if let Err(e) = midi_file::stream_midi_file(
+                        &midi_path,
+                        render_tx,
+                        Some(playback_prod),
+                        clock_bp,
+                        sr,
+                        chunk,
+                        transport_rx_thread,
+                        transport_state_thread,
+                    ) {
+                        tracing::error!("basic-pitch MIDI playback error: {e:#}");
                     }
                 })?;
         }

@@ -43,14 +43,30 @@ impl AudioPlayback {
             buffer_size: cpal::BufferSize::Default,
         };
 
+        let mut last_sample = 0.0f32;
+        let mut underrun_count = 0u64;
+
         let stream = device.build_output_stream(
             &stream_config,
             move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
                 for sample in data.iter_mut() {
-                    *sample = consumer.pop().unwrap_or(0.0);
+                    match consumer.pop() {
+                        Ok(s) => {
+                            last_sample = s;
+                            *sample = s;
+                        }
+                        Err(_) => {
+                            // Sample-hold fallback: avoids click from abrupt drop to 0
+                            *sample = last_sample;
+                            underrun_count += 1;
+                            if underrun_count & (underrun_count - 1) == 0 {
+                                eprintln!("[audio] ring underrun (×{underrun_count})");
+                            }
+                        }
+                    }
                 }
             },
-            |err| error!("Audio output stream error: {err}"),
+            |err| eprintln!("[audio] output stream error: {err}"),
             None,
         )?;
 

@@ -1,4 +1,5 @@
 // Re-export modules for integration tests.
+pub mod basic_pitch;
 pub mod config;
 pub mod dsp;
 pub mod events;

@@ -20,6 +20,7 @@ fn onset_fires_on_impulse() {
 
     let dsp_config = DspConfig {
         fft_size,
+        bass_fft_size: 8192,
         hop_size,
         n_mels: 229,
         mel_fmin: 30.0,
