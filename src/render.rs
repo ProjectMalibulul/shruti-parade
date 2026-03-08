@@ -1109,6 +1109,8 @@ impl App {
         self.particles.clear();
         self.pedal_brightness = 0.0;
         self.pedal_held = false;
+        // Drain stale events that were queued before the seek.
+        while self.event_rx.try_recv().is_ok() {}
     }
 
     fn handle_playbar_press(&mut self, ndc: [f32; 2]) {
@@ -1155,6 +1157,9 @@ impl App {
         }
         let total_samples = self.transport_state.total_samples();
         let target = sample.min(total_samples);
+        // Flush stale audio from the ring immediately so the output callback
+        // doesn't play old audio between now and when the feed thread resets.
+        self.transport_state.request_flush();
         self.clock.set_samples(target);
         self.clear_visuals();
         let _ = self

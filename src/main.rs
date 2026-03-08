@@ -138,6 +138,8 @@ fn main() -> Result<()> {
                     config.audio.sample_rate,
                     config.audio.buffer_frames,
                     playback_cons,
+                    clock.clone(),
+                    transport_state.clone(),
                 )?);
                 _audio_handle = None;
 
@@ -179,6 +181,8 @@ fn main() -> Result<()> {
                     config.audio.sample_rate,
                     config.audio.buffer_frames,
                     playback_cons,
+                    clock.clone(),
+                    transport_state.clone(),
                 )?);
                 _audio_handle = None;
 
@@ -222,6 +226,8 @@ fn main() -> Result<()> {
                     file_sr,
                     config.audio.buffer_frames,
                     playback_cons,
+                    clock.clone(),
+                    transport_state.clone(),
                 )?);
                 _audio_handle = None;
 

@@ -129,6 +129,10 @@ pub fn decode_audio_file(path: &Path) -> Result<(Vec<f32>, u32, usize)> {
 /// original stereo field, or duplicating mono to L+R).
 /// The two rings are fed **independently** so that a slow DSP consumer cannot
 /// starve the playback ring.
+///
+/// **Clock advancement is NOT done here** — the output callback in `audio.rs`
+/// is the authoritative clock source, advancing when samples are actually
+/// played through the speakers.
 pub fn stream_audio_file(
     path: &Path,
     mut producer: rtrb::Producer<f32>,
@@ -165,10 +169,20 @@ pub fn stream_audio_file(
     }
     let mut dsp_cursor: usize = prefill;
     let mut pb_cursor: usize = prefill;
-    let mut clock_pos: usize = prefill;
-    clock.advance(prefill as u64);
 
     while dsp_cursor < total_frames || pb_cursor < total_frames {
+        // Exit if the playback consumer was dropped (e.g. new file loaded)
+        if let Some(ref pb) = playback_producer {
+            if pb.is_abandoned() {
+                info!("Playback consumer dropped — stopping audio ingest");
+                break;
+            }
+        }
+        if producer.is_abandoned() {
+            info!("DSP consumer dropped — stopping audio ingest");
+            break;
+        }
+
         while let Ok(cmd) = transport_rx.try_recv() {
             match cmd {
                 TransportCommand::Play => {
@@ -183,7 +197,8 @@ pub fn stream_audio_file(
                     let target = sample.min(total_frames as u64) as usize;
                     dsp_cursor = target;
                     pb_cursor = target;
-                    clock_pos = target;
+                    // Flush stale audio from playback ring via output callback
+                    transport_state.request_flush();
                     clock.set_samples(target as u64);
                 }
             }
@@ -196,7 +211,7 @@ pub fn stream_audio_file(
 
         let mut did_work = false;
 
-        // ---- Feed DSP ring (mono) ----
+        // ---- Feed DSP ring (mono) — always, limited only by ring capacity ----
         if dsp_cursor < total_frames {
             let dsp_slots = producer.slots();
             if dsp_slots >= chunk_size {
@@ -209,32 +224,32 @@ pub fn stream_audio_file(
             }
         }
 
-        // ---- Feed playback ring (stereo interleaved, independent of DSP) ----
+        // ---- Feed playback ring (stereo, throttled to ~1 s ahead) ----
+        // Throttle the playback ring so the feed thread doesn't outrun the
+        // output callback by more than ~1 second. The DSP ring is NOT
+        // throttled — it runs ahead freely for timely pitch detection.
         if pb_cursor < total_frames {
-            if let Some(ref mut pb) = playback_producer {
-                let pb_slots = pb.slots();
-                let needed = chunk_size * 2; // stereo: 2 samples per frame
-                if pb_slots >= needed {
-                    let end = (pb_cursor + chunk_size).min(total_frames);
-                    for frame in
-                        samples[pb_cursor * n_channels..end * n_channels].chunks(n_channels)
-                    {
-                        let _ = pb.push(frame[0]);
-                        let _ = pb.push(if n_channels >= 2 { frame[1] } else { frame[0] });
+            let max_ahead: u64 = (_sr as u64).max(chunk_size as u64 * 8);
+            let clock_pos = clock.now_samples();
+            if pb_cursor as u64 <= clock_pos.saturating_add(max_ahead) {
+                if let Some(ref mut pb) = playback_producer {
+                    let pb_slots = pb.slots();
+                    let needed = chunk_size * 2; // stereo: 2 samples per frame
+                    if pb_slots >= needed {
+                        let end = (pb_cursor + chunk_size).min(total_frames);
+                        for frame in
+                            samples[pb_cursor * n_channels..end * n_channels].chunks(n_channels)
+                        {
+                            let _ = pb.push(frame[0]);
+                            let _ = pb.push(if n_channels >= 2 { frame[1] } else { frame[0] });
+                        }
+                        pb_cursor = end;
+                        did_work = true;
                     }
-                    pb_cursor = end;
-                    did_work = true;
+                } else {
+                    pb_cursor = total_frames;
                 }
-            } else {
-                pb_cursor = total_frames;
             }
-        }
-
-        // ---- Advance clock to the slower consumer's position ----
-        let new_pos = dsp_cursor.min(pb_cursor);
-        if new_pos > clock_pos {
-            clock.advance((new_pos - clock_pos) as u64);
-            clock_pos = new_pos;
         }
 
         if !did_work {

@@ -295,8 +295,6 @@ pub fn stream_midi_file(
     let mut synth = Synth::new(sample_rate);
     let mut event_idx = 0;
     let mut current_sample: u64 = 0;
-    let sleep_per_chunk =
-        std::time::Duration::from_secs_f64(chunk_size as f64 / sample_rate as f64);
     // Extra 1s after last note for release tails
     let end_sample = last_sample + sample_rate as u64;
     transport_state.set_total_samples(end_sample);
@@ -336,6 +334,8 @@ pub fn stream_midi_file(
                     event_idx = seek_event_index(target);
                     synth = Synth::new(sample_rate);
                     audio_buf.fill(0.0);
+                    // Flush stale audio from playback ring via output callback
+                    transport_state.request_flush();
                 }
             }
         }
@@ -345,9 +345,22 @@ pub fn stream_midi_file(
             continue;
         }
 
+        // Don't synthesize more than ~0.5 s ahead of actual playback.
+        // The output callback drives the clock; this prevents the MIDI
+        // thread from dumping the entire song into the ring at once.
+        let max_ahead: u64 = sample_rate as u64 / 2;
+        if current_sample > clock.now_samples().saturating_add(max_ahead) {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            continue;
+        }
+
         // Ring-occupancy pacing: wait until the playback ring has room
         // before pushing. Stereo output requires 2× samples per chunk.
         if let Some(ref pb) = playback_producer {
+            if pb.is_abandoned() {
+                info!("Playback consumer dropped — stopping MIDI playback");
+                break;
+            }
             if pb.slots() < chunk_size * 2 {
                 std::thread::sleep(std::time::Duration::from_millis(1));
                 continue;
@@ -383,9 +396,11 @@ pub fn stream_midi_file(
             }
         }
 
-        clock.advance(chunk_size as u64);
         current_sample += chunk_size as u64;
-        std::thread::sleep(sleep_per_chunk);
+        // Pacing: wait a bit before next synthesis chunk.
+        // The primary rate-limiter is ring occupancy (checked at loop top);
+        // this small sleep prevents hot-spinning when the ring has room.
+        std::thread::sleep(std::time::Duration::from_millis(1));
     }
 
     info!("MIDI playback complete");

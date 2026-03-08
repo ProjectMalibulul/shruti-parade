@@ -7,6 +7,7 @@ use tracing::{error, info};
 
 use crate::config::AudioConfig;
 use crate::timing::AudioClock;
+use crate::transport::TransportState;
 
 /// Owns the `cpal` input stream. Dropping this stops capture.
 pub struct AudioCapture {
@@ -25,12 +26,16 @@ impl AudioPlayback {
     ///
     /// The audio callback is **real-time safe**: it only pops samples via
     /// wait-free `rtrb::Consumer::pop`, outputting silence when the ring is empty.
-    /// `sample_rate` should match the WAV file's native rate so playback
-    /// runs at the correct speed without resampling.
+    ///
+    /// **The callback is the authoritative clock driver** for file-playback
+    /// modes: it calls `clock.advance()` for every frame it actually outputs,
+    /// keeping the visual renderer perfectly synchronised with the speakers.
     pub fn start(
         sample_rate: u32,
         buffer_frames: usize,
         mut consumer: rtrb::Consumer<f32>,
+        clock: Arc<AudioClock>,
+        transport_state: Arc<TransportState>,
     ) -> Result<Self> {
         let host = cpal::default_host();
         let device = match host.default_output_device() {
@@ -40,10 +45,17 @@ impl AudioPlayback {
                 let drain = std::thread::Builder::new()
                     .name("audio-drain".into())
                     .spawn(move || {
-                        // Drain ring so producers never block
                         loop {
+                            if transport_state.should_flush() {
+                                while consumer.pop().is_ok() {}
+                                transport_state.clear_flush();
+                            }
                             match consumer.pop() {
-                                Ok(_) => {}
+                                Ok(_) => {
+                                    // Pop pairs (stereo) and advance clock
+                                    let _ = consumer.pop();
+                                    clock.advance(1);
+                                }
                                 Err(_) => std::thread::sleep(std::time::Duration::from_millis(1)),
                             }
                         }
@@ -66,13 +78,28 @@ impl AudioPlayback {
 
         let mut last_l = 0.0f32;
         let mut last_r = 0.0f32;
-        let mut underrun_count = 0u64;
 
         let stream = device.build_output_stream(
             &stream_config,
             move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                // Pop two samples per stereo frame: one L, one R.
-                // The feed thread always pushes interleaved stereo pairs.
+                // ── Flush: drain stale data after a seek ──
+                if transport_state.should_flush() {
+                    while consumer.pop().is_ok() {}
+                    last_l = 0.0;
+                    last_r = 0.0;
+                    transport_state.clear_flush();
+                }
+
+                // ── Paused: output silence, don't touch ring or clock ──
+                if transport_state.is_paused() {
+                    for sample in data.iter_mut() {
+                        *sample = 0.0;
+                    }
+                    return;
+                }
+
+                // ── Normal playback: pop stereo pairs, advance clock ──
+                let mut frames_played: u64 = 0;
                 for frame in data.chunks_mut(2) {
                     match (consumer.pop(), consumer.pop()) {
                         (Ok(l), Ok(r)) => {
@@ -80,17 +107,19 @@ impl AudioPlayback {
                             last_r = r;
                             frame[0] = l;
                             frame[1] = r;
+                            frames_played += 1;
                         }
                         _ => {
-                            // Sample-hold fallback: avoids click from abrupt drop to 0
+                            // Ring empty — fade to silence to avoid DC hold
+                            last_l *= 0.95;
+                            last_r *= 0.95;
                             frame[0] = last_l;
                             frame[1] = last_r;
-                            underrun_count += 1;
-                            if underrun_count & (underrun_count - 1) == 0 {
-                                eprintln!("[audio] ring underrun (×{underrun_count})");
-                            }
                         }
                     }
+                }
+                if frames_played > 0 {
+                    clock.advance(frames_played);
                 }
             },
             |err| eprintln!("[audio] output stream error: {err}"),
